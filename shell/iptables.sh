@@ -1,5 +1,13 @@
 #!/bin/sh
-/etc/init.d/iptables restart 
+# Check if user is root
+if [ $(id -u) != "0" ]; then
+    echo "Error: You must be root to run this script, use sudo sh $0"
+    exit 1
+fi
+clear
+echo "========================================================================="
+echo "limit data bytes with iptables"
+echo "========================================================================="
 echo "enter your data limit ?G"
 read d
 echo "enter your port:"
