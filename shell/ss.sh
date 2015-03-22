@@ -61,7 +61,7 @@ echo "2. stop"
 echo "3. restart"
 echo "4. vpn"
 echo "5. editconf"
-echo "6. iptable"
+echo "6. data traffic"
 read num
 
 case "$num" in
