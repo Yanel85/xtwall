@@ -39,9 +39,6 @@ function_restart()
 
 function_iptable()
 {
-echo input port
-read port
-sudo iptables -I OUTPUT -s 128.199.142.85 -p tcp --sport $port
 sudo iptables -n -v -L -t filter
 }
 function_status()
