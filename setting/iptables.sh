@@ -60,7 +60,9 @@ echo -e "\n"
 echo "I. insert iptables"
 echo "R. reples iptables"
 echo "D. delete iptables"
-read -p "Input your iptables option [I/R/D]" o
+read -p "Input your iptables option [I/R/D] Cpital" -n 1 o
+echo -e "\n"
+
 case "$o" in
 [I] ) (function_i);;
 [R] ) (function_r);;
