@@ -14,7 +14,7 @@ echo "========================================================================="
 echo "limit data with iptables"
 echo "========================================================================="
 echo -e "\n"
-read -p "Input your iptables option [I/R/D]" -n 1 O
+read -p "Input your iptables option [I/R/D]" -n 1 o
 echo -e "\n"
 read -p "Input your data limit [M]" d
 echo -e "\n"
