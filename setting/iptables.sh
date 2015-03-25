@@ -10,19 +10,9 @@ fi
 
 clear
 
-echo "========================================================================="
-echo "limit data with iptables"
-echo "========================================================================="
-echo -e "\n"
-read -p "Input your iptables option [I/R/D]" o
-case "$o" in
-[I] ) (function_i);;
-[R] ) (function_r);;
-[D] ) (function_d);;
-*) echo "nothing,exit";;
-esac
 
-function_i(){
+function_i()
+{
 echo -e "\n"
 read -p "Input your data limit [M]" d
 echo -e "\n"
@@ -36,7 +26,8 @@ done
 iptables -n -v -L -t filter
 }
 
-function_r(){
+function_r()
+{
 echo -e "\n"
 read -p "Input your data limit [M]" d
 echo -e "\n"
@@ -50,7 +41,8 @@ done
 iptables -n -v -L -t filter
 }
 
-function_d(){
+function_d()
+{
 echo -e "\n"
 read -p "Input shadowsocks port:" p
 for port in $p;do
@@ -61,4 +53,18 @@ done
 iptables -n -v -L -t filter
 }
 
+echo "========================================================================="
+echo "limit data with iptables"
+echo "========================================================================="
+echo -e "\n"
+echo "I. insert iptables"
+echo "R. reples iptables"
+echo "D. delete iptables"
+read -p "Input your iptables option [I/R/D]" o
+case "$o" in
+[I] ) (function_i);;
+[R] ) (function_r);;
+[D] ) (function_d);;
+*) echo "nothing,exit";;
+esac
 
