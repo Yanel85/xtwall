@@ -45,7 +45,7 @@ echo "========================================================================="
 echo -e "\n"
 echo "I. insert iptables"
 echo "D. delete iptables"
-read -p "Input your iptables option [I/D] Cpital" -n 1 o
+read -p "Input your iptables option Cpital [I/D] " -n 1 o
 echo -e "\n"
 
 case "$o" in
