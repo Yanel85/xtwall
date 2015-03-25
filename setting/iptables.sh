@@ -36,7 +36,7 @@ d=$[$d*1048576]
 for port in $p;do
 iptables -$o OUTPUT -p tcp --sport $port -j DROP
 iptables -$o OUTPUT -p tcp --sport $port -m quota --quota $d -j ACCEPT  
-echo "ADD PORT $port"
+echo "REPLES PORT $port"
 done
 iptables -n -v -L -t filter
 }
@@ -48,7 +48,7 @@ read -p "Input shadowsocks port:" p
 for port in $p;do
 iptables -$o OUTPUT -p tcp --sport $port -j DROP
 iptables -$o OUTPUT -p tcp --sport $port -m quota --quota 1048576 -j ACCEPT  
-echo "ADD PORT $port"
+echo "DELETE PORT $port"
 done
 iptables -n -v -L -t filter
 }
