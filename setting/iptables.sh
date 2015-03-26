@@ -23,6 +23,7 @@ iptables -$o OUTPUT -p tcp --sport $port -j DROP
 iptables -$o OUTPUT -p tcp --sport $port -m quota --quota $d -j ACCEPT  
 echo "ADD PORT $port"
 done
+service iptables save
 iptables -n -v -L -t filter
 }
 
@@ -36,6 +37,7 @@ iptables -$o OUTPUT -p tcp --sport $port -j DROP
 iptables -$o OUTPUT -p tcp --sport $port -m quota --quota 1048576 -j ACCEPT  
 echo "DELETE PORT $port"
 done
+service iptables save
 iptables -n -v -L -t filter
 }
 
