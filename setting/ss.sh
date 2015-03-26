@@ -11,7 +11,7 @@ fi
 printf "=========================================================================\n"
 printf "Manager for shadowsocks"
 printf "=========================================================================\n"
-printf "Usage: /root/shadowsocks {start|stop|restart|status}\n"
+printf "Usage: /root/ss {start|stop|restart|status|iptables|edit}\n"
 printf "=========================================================================\n"
 
 
@@ -19,33 +19,33 @@ printf "========================================================================
 function_start()
 {
     printf "Starting shadowsocks...\n"
-    ssserver -c /etc/shadowsocks.json -d start
+    /etc/init.d/shadowsocks start
+
 }
 
 function_stop()
 {
     printf "Stoping shadowsocks...\n"
-    ssserver -c /etc/shadowsocks.json -d stop
+     /etc/init.d/shadowsocks  stop
 
 }
 
 function_restart()
 {
     printf "Stoping shadowsocks...\n"
-    ssserver -c /etc/shadowsocks.json -d stop
-    ssserver -c /etc/shadowsocks.json -d start
+     /etc/init.d/shadowsocks start
+     /etc/init.d/shadowsocks stop
 
 }
 
 function_iptable()
 {
-sudo iptables -n -v -L -t filter
+	sudo iptables -n -v -L -t filter
 }
+
 function_status()
 {
-    vi /etc/ppp/chap-secrets
-	service iptables restart
-	service pptpd start
+       /etc/init.d/shadowsocks status
 }
 
 function_edit()
@@ -59,9 +59,9 @@ echo "which do you want to?input the number."
 echo "1. start"
 echo "2. stop"
 echo "3. restart"
-echo "4. vpn"
-echo "5. editconf"
-echo "6. data traffic"
+echo "4. status"
+echo "5. edit ss json file"
+echo "6. iptables data traffic status"
 read num
 
 case "$num" in
