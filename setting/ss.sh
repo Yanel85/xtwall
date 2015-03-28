@@ -33,9 +33,8 @@ function_stop()
 function_restart()
 {
     printf "Stoping shadowsocks...\n"
-     /etc/init.d/shadowsocks start
      /etc/init.d/shadowsocks stop
-
+     /etc/init.d/shadowsocks start
 }
 
 function_iptable()
