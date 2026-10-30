@@ -15,6 +15,8 @@ bash <(curl -sL https://raw.githubusercontent.com/Yanel85/xtwall/main/install.sh
 xtwall
 ```
 
+首次通过 `install.sh` 安装时，会自动进入一键安装流程，完成后显示运维菜单。
+
 非交互命令：
 
 ```sh

@@ -96,4 +96,4 @@ if [ -f /usr/local/etc/xtwall/config.json ]; then
 fi
 
 echo "安装完成，正在启动 xtwall"
-exec /usr/local/bin/xtwall
+exec /usr/local/bin/xtwall --install

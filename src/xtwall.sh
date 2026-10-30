@@ -171,9 +171,9 @@ urlDecode() {
 
 continue_prompt() {
   local choice
-  read -rp "继续其他操作 (yes/no)? " choice
+  read -rp "继续其他操作 (Y/N)? " choice
   case "${choice}" in
-    [yY]|[yY][eE][sS] ) return 0 ;;
+    [yY] ) return 0 ;;
     * ) exit 0;;
   esac
 }
@@ -284,9 +284,12 @@ install_dependencies() {
   ${PACKAGE_MANAGEMENT_UPDATE} -y 2>&1 | writeLog >> "${log_path}"
   ${PACKAGE_MANAGEMENT_INSTALL} curl wget unzip jq lsof coreutils tar openssl -y 2>&1 | writeLog >> "${log_path}"
   local cmd
-  for cmd in curl jq unzip tar lsof; do
+  for cmd in curl jq unzip tar; do
     command -v "${cmd}" >/dev/null 2>&1 || die "error: 依赖 ${cmd} 安装失败"
   done
+  if ! command -v ss >/dev/null 2>&1 && ! command -v lsof >/dev/null 2>&1; then
+    die "error: 依赖 ss 或 lsof 安装失败"
+  fi
 }
 
 # ============================================================
@@ -615,10 +618,10 @@ ask_domain() {
       colorEcho "${LYELLOW}" "域名 ${domain} 解析正确, 即将继续"
       break
     fi
-    colorEcho "${RED}" "域名 ${domain} 解析有误 (yes: 强制继续, no: 重新输入, quit: 离开)"
-    read -rp "若您确定域名解析正确, 可强制继续 (yes/no/quit) " forceConfirm
+    colorEcho "${RED}" "域名 ${domain} 解析有误 (Y: 强制继续, N: 重新输入, quit: 离开)"
+    read -rp "若您确定域名解析正确, 可强制继续 (Y/N/quit) " forceConfirm
     case "${forceConfirm}" in
-      [yY]|[yY][eE][sS] ) break ;;
+      [yY] ) break ;;
       [qQ]|[qQ][uU][iI][tT] ) return 1 ;;
     esac
   done
@@ -1438,9 +1441,9 @@ toggle_cdn() {
   current="$(state_get '.sub.cdn')"
   if [ "${current}" == "true" ]; then
     colorEcho "${YELLOW}" "当前 CDN 入口已开启，关闭后 CDN 节点将从订阅中移除"
-    read -rp "确认关闭 CDN 入口 (yes/no)? " choice
+    read -rp "确认关闭 CDN 入口 (Y/N)? " choice
     case "${choice}" in
-      [yY]|[yY][eE][sS] )
+      [yY] )
         state_set '.sub.cdn' 'false'
         colorEcho "${GREEN}" "CDN 入口已关闭"
         ;;
@@ -1449,9 +1452,9 @@ toggle_cdn() {
   else
     colorEcho "${YELLOW}" "开启后会在订阅中追加经由 Cloudflare 的备用入口"
     colorEcho "${YELLOW}" "请确保域名己解析到 Cloudflare 并设置成 \"DNS Only\" (云朵为灰色)"
-    read -rp "确认开启 CDN 入口 (yes/no)? " choice
+    read -rp "确认开启 CDN 入口 (Y/N)? " choice
     case "${choice}" in
-      [yY]|[yY][eE][sS] )
+      [yY] )
         cf_node="$(state_get '.sub.cfNode')"
         [ -z "${cf_node}" ] && { cf_node="${cf_node_default}"; state_set '.sub.cfNode' "$(json_quote "${cf_node}")"; }
         state_set '.sub.cdn' 'true'
@@ -1580,9 +1583,9 @@ migrate_from_old() {
   colorEcho "${YELLOW}" "检测到旧组件: ${legacy[*]}"
   colorEcho "${YELLOW}" "这些组件会与 xtwall 抢占端口，需要先停止"
   local choice
-  read -rp "停止并禁用以上服务 (yes/no)? " choice
+  read -rp "停止并禁用以上服务 (Y/N)? " choice
   case "${choice}" in
-    [yY]|[yY][eE][sS] )
+    [yY] )
       for svc in "${legacy[@]}"; do
         systemctl stop "${svc}" 2>/dev/null
         systemctl disable "${svc}" 2>/dev/null
@@ -1863,6 +1866,10 @@ main() {
   state_init
 
   case "${1}" in
+    --install)
+      install_all
+      menu
+      ;;
     --cert-sync) cert_sync ;;
     --status)
       check_status
