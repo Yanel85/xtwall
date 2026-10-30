@@ -1,0 +1,49 @@
+{
+  "version": "",
+  "domain": "",
+  "acmeEmail": "",
+  "caddy": {
+    "installed": false,
+    "httpsPort": 8443,
+    "certPath": ""
+  },
+  "xray": {
+    "installed": false,
+    "uuid": "",
+    "reality": {
+      "privateKey": "",
+      "publicKey": "",
+      "shortId": "",
+      "serverNames": []
+    },
+    "ws": {
+      "vlessPort": 8080,
+      "vlessPath": "/ws",
+      "trojanPort": 8081,
+      "trojanPath": "/tj",
+      "trojanPassword": ""
+    }
+  },
+  "hysteria": {
+    "installed": false,
+    "password": "",
+    "obfsPassword": "",
+    "port": 443
+  },
+  "sub": {
+    "enabled": false,
+    "uri": "",
+    "cdn": false,
+    "cfNode": "icook.tw",
+    "nodes": {
+      "reality": "",
+      "ws": "",
+      "trojan": "",
+      "hysteria": ""
+    },
+    "api": {
+      "installed": false,
+      "port": 25500
+    }
+  }
+}
