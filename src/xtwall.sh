@@ -333,12 +333,12 @@ state_default() {
     "enabled": false,
     "uri": "",
     "cdn": false,
+    "cdnDomain": "",
     "cfNode": "${cf_node_default}",
     "nodes": {
       "reality": "",
       "ws": "",
       "trojan": "",
-      "ss": "",
       "hysteria": ""
     },
     "api": {
@@ -393,6 +393,7 @@ state_init() {
       .sub.enabled //= false |
       .sub.uri //= "" |
       .sub.cdn //= false |
+      .sub.cdnDomain //= "" |
       .sub.cfNode //= "'"${cf_node_default}"'" |
       .sub.cfNode |= if . == "icook.tw" then "'"${cf_node_default}"'" else . end |
       .sub.nodes.reality //= "" |
@@ -431,7 +432,7 @@ cert_days_left() {
 
 check_status() {
   local domain="" xray_installed="false" caddy_installed="false" hy_installed="false"
-  local sub_enabled="false" sub_uri="" cdn="false"
+  local sub_enabled="false" sub_uri="" cdn="false" cdn_domain=""
 
   if [ -f "${config_path}" ]; then
     domain="$(state_get '.domain')"
@@ -441,6 +442,7 @@ check_status() {
     sub_enabled="$(state_get '.sub.enabled')"
     sub_uri="$(state_get '.sub.uri')"
     cdn="$(state_get '.sub.cdn')"
+    cdn_domain="$(state_get '.sub.cdnDomain')"
   fi
 
   printf "当前域名: "
@@ -462,15 +464,21 @@ check_status() {
   fi
 
   printf "CDN 入口: "
-  if [ "${cdn}" == "true" ]; then
-    colorEcho "${GREEN}" "已开启"
+  if [ "${cdn}" == "true" ] && [ -n "${cdn_domain}" ]; then
+    colorEcho "${GREEN}" "已开启 (${cdn_domain})"
+  elif [ "${cdn}" == "true" ]; then
+    colorEcho "${YELLOW}" "已开启但未设置 CDN 域名"
   else
     colorEcho "${BLUE}" "未开启"
   fi
 
   if [ "${sub_enabled}" == "true" ] && [ -n "${domain}" ] && [ -n "${sub_uri}" ]; then
+    local sub_domain="${domain}"
+    if [ "${cdn}" == "true" ] && [ -n "${cdn_domain}" ]; then
+      sub_domain="${cdn_domain}"
+    fi
     printf "订阅链接: "
-    colorEcho "${GREEN}" "https://${domain}/${sub_uri}"
+    colorEcho "${GREEN}" "https://${sub_domain}/${sub_uri}"
   fi
 
   local days
@@ -806,40 +814,13 @@ update_web() {
   colorEcho "${LGREEN}" "伪装站点模板更新完成"
 }
 
-set_caddyfile() {
-  local domain email vless_path trojan_path
-  domain="$(state_get '.domain')"
-  email="$(state_get '.acmeEmail')"
-  vless_path="$(state_get '.xray.ws.vlessPath')"
-  trojan_path="$(state_get '.xray.ws.trojanPath')"
+caddy_site_block() {
+  # caddy_site_block [域名] [vless path] [trojan path]
+  local d="$1" vless_path="$2" trojan_path="$3"
+  cat <<EOF
 
-  [ -z "${domain}" ] && { colorEcho "${RED}" "尚未设置域名"; return 1; }
-  [ -z "${vless_path}" ] && vless_path="/ws"
-  [ -z "${trojan_path}" ] && trojan_path="/tj"
-
-  if [ -z "${email}" ]; then
-    email="xtwall-$(random_hex 6)@${domain}"
-    state_set '.acmeEmail' "$(json_quote "${email}")"
-  fi
-
-  mkdir -p "$(dirname "${caddy_conf}")"
-  [ -f "${caddy_conf}" ] && cp -a "${caddy_conf}" "${caddy_conf}.bak.$(date +%s)"
-
-  cat > "${caddy_conf}" <<EOF
-{
-	admin off
-	email ${email}
-	auto_https disable_redirects
-	storage file_system {
-		root ${caddy_cert_root}
-	}
-	servers {
-		protocols h1 h2
-	}
-}
-
-# 内部监听 8443，由 Reality dest 回落与本机访问；对外不需要放行
-https://${domain}:${CADDY_HTTPS_PORT} {
+# ${d}: 伪装站与 WS 反代，由 Reality dest 回落或 CDN 回源命中
+https://${d}:${CADDY_HTTPS_PORT} {
 	bind 127.0.0.1
 	encode zstd gzip
 	tls {
@@ -868,14 +849,89 @@ https://${domain}:${CADDY_HTTPS_PORT} {
 		file_server
 	}
 }
+EOF
+}
+
+caddy_http_block() {
+  local d="$1"
+  cat <<EOF
 
 # 80 端口仅用于 ACME HTTP-01 验证与跳转
-http://${domain} {
+http://${d} {
 	redir https://{host}{uri} permanent
 }
 EOF
+}
+
+caddy_masquerade_block() {
+  cat <<EOF
+
+# 兜底站点：Hysteria2 masquerade 以 127.0.0.1 访问 8443 时命中此处
+https://:${CADDY_HTTPS_PORT} {
+	bind 127.0.0.1
+	tls internal
+	root * ${web_root}
+	file_server
+}
+EOF
+}
+
+set_caddyfile() {
+  # set_caddyfile [yes|no]  no 表示不生成兜底站点（旧版 caddy 不支持时自动降级）
+  local domain email vless_path trojan_path cdn_domain with_fallback
+  with_fallback="${1:-yes}"
+  domain="$(state_get '.domain')"
+  email="$(state_get '.acmeEmail')"
+  vless_path="$(state_get '.xray.ws.vlessPath')"
+  trojan_path="$(state_get '.xray.ws.trojanPath')"
+  cdn_domain="$(state_get '.sub.cdnDomain')"
+
+  [ -z "${domain}" ] && { colorEcho "${RED}" "尚未设置域名"; return 1; }
+  [ -z "${vless_path}" ] && vless_path="/ws"
+  [ -z "${trojan_path}" ] && trojan_path="/tj"
+  [ "${cdn_domain}" == "${domain}" ] && cdn_domain=""
+
+  if [ -z "${email}" ]; then
+    email="xtwall-$(random_hex 6)@${domain}"
+    state_set '.acmeEmail' "$(json_quote "${email}")"
+  fi
+
+  mkdir -p "$(dirname "${caddy_conf}")"
+  [ -f "${caddy_conf}" ] && cp -a "${caddy_conf}" "${caddy_conf}.bak.$(date +%s)"
+
+  {
+    cat <<EOF
+{
+	admin off
+	email ${email}
+	auto_https disable_redirects
+	storage file_system {
+		root ${caddy_cert_root}
+	}
+	servers {
+		protocols h1 h2
+	}
+}
+EOF
+    caddy_site_block "${domain}" "${vless_path}" "${trojan_path}"
+    if [ -n "${cdn_domain}" ]; then
+      caddy_site_block "${cdn_domain}" "${vless_path}" "${trojan_path}"
+    fi
+    caddy_http_block "${domain}"
+    if [ -n "${cdn_domain}" ]; then
+      caddy_http_block "${cdn_domain}"
+    fi
+    if [ "${with_fallback}" == "yes" ]; then
+      caddy_masquerade_block
+    fi
+  } > "${caddy_conf}"
 
   if ! run_logged "${caddy_bin}" validate --config "${caddy_conf}" --adapter caddyfile; then
+    if [ "${with_fallback}" == "yes" ]; then
+      colorEcho "${YELLOW}" "兜底站点不被当前 caddy 接受，降级为无兜底站点模式"
+      set_caddyfile no
+      return $?
+    fi
     colorEcho "${RED}" "Caddyfile 校验失败"
     local bak
     bak="$(ls -1t "${caddy_conf}".bak.* 2>/dev/null | head -n 1)"
@@ -886,12 +942,15 @@ EOF
 }
 
 # 等待 Caddy 完成 ACME 签发，最长 120s
+# wait_caddy_cert [域名] [no-state]  no-state 时不覆盖主域证书路径
 wait_caddy_cert() {
-  local domain="$1" i cert
+  local domain="$1" keep_state="${2:-}" i cert
   for i in $(seq 1 60); do
     cert="$(find "${caddy_cert_root}/certificates" -type f -name "${domain}.crt" 2>/dev/null | head -n 1)"
     if [ -n "${cert}" ]; then
-      state_set '.caddy.certPath' "$(json_quote "${cert}")"
+      if [ "${keep_state}" != "no-state" ]; then
+        state_set '.caddy.certPath' "$(json_quote "${cert}")"
+      fi
       return 0
     fi
     sleep 2
@@ -901,9 +960,9 @@ wait_caddy_cert() {
 
 cert_status() {
   printf "\n"
-  local domain cert_file days
+  local domain cdn_domain d label cert_file days
   domain="$(state_get '.domain')"
-  cert_file="$(state_get '.caddy.certPath')"
+  cdn_domain="$(state_get '.sub.cdnDomain')"
 
   if [ -z "${domain}" ]; then
     colorEcho "${YELLOW}" "尚未设置域名"
@@ -911,22 +970,35 @@ cert_status() {
     return 0
   fi
 
-  if [ -z "${cert_file}" ] || [ ! -f "${cert_file}" ]; then
-    cert_file="$(find "${caddy_cert_root}/certificates" -type f -name "${domain}.crt" 2>/dev/null | head -n 1)"
+  local -a domains=("${domain}")
+  if [ -n "${cdn_domain}" ] && [ "${cdn_domain}" != "${domain}" ]; then
+    domains+=("${cdn_domain}")
   fi
 
-  if [ -n "${cert_file}" ] && [ -f "${cert_file}" ]; then
-    days="$(cert_days_left "${cert_file}")"
-    printf "%s\t%s\t" "[Caddy]" "${domain}" | expand -t 16
-    if [ -n "${days}" ] && [ "${days}" -gt 0 ]; then
-      colorEcho "${GREEN}" "正常 (剩余 ${days} 天)"
+  for d in "${domains[@]}"; do
+    label="[Caddy]"
+    cert_file=""
+    if [ "${d}" == "${domain}" ]; then
+      cert_file="$(state_get '.caddy.certPath')"
     else
-      colorEcho "${RED}" "异常 (证书已过期)"
+      label="[CDN]"
     fi
-  else
-    printf "%s\t%s\t" "[Caddy]" "${domain}" | expand -t 16
-    colorEcho "${RED}" "异常 (未找到证书)"
-  fi
+    if [ -z "${cert_file}" ] || [ ! -f "${cert_file}" ]; then
+      cert_file="$(find "${caddy_cert_root}/certificates" -type f -name "${d}.crt" 2>/dev/null | head -n 1)"
+    fi
+
+    printf "%s\t%s\t" "${label}" "${d}" | expand -t 16
+    if [ -n "${cert_file}" ] && [ -f "${cert_file}" ]; then
+      days="$(cert_days_left "${cert_file}")"
+      if [ -n "${days}" ] && [ "${days}" -gt 0 ]; then
+        colorEcho "${GREEN}" "正常 (剩余 ${days} 天)"
+      else
+        colorEcho "${RED}" "异常 (证书已过期)"
+      fi
+    else
+      colorEcho "${RED}" "异常 (未找到证书)"
+    fi
+  done
 
   printf "%s\t%s\t" "[服务]" "caddy" | expand -t 16
   if systemctl is-active --quiet caddy; then
@@ -1290,7 +1362,7 @@ get_hysteria() {
 }
 
 set_hysteria_config() {
-  local domain pwd obfs_pwd
+  local domain pwd obfs_pwd masquerade
   domain="$(state_get '.domain')"
   [ -z "${domain}" ] && { colorEcho "${RED}" "尚未设置域名"; return 1; }
 
@@ -1301,6 +1373,25 @@ set_hysteria_config() {
 
   mkdir -p "$(dirname "${hysteria_conf}")" "${hysteria_cert_dir}"
   [ -f "${hysteria_conf}" ] && cp -a "${hysteria_conf}" "${hysteria_conf}.bak.$(date +%s)"
+
+  # 8443 有兜底站点时用反向代理伪装成 mikutap，否则退化为静态页面
+  if grep -q "^https://:${CADDY_HTTPS_PORT}" "${caddy_conf}" 2>/dev/null; then
+    masquerade="masquerade:
+  type: proxy
+  proxy:
+    url: https://127.0.0.1:${CADDY_HTTPS_PORT}
+    rewriteHost: true
+    insecure: true"
+  else
+    masquerade="masquerade:
+  type: string
+  string:
+    statusCode: 200
+    headers:
+      content-type: text/html; charset=utf-8
+    body: |
+      <!DOCTYPE html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><title>Welcome</title></head><body><h1>Hello World</h1></body></html>"
+  fi
 
   cat > "${hysteria_conf}" <<-EOF
 listen: :${REALITY_PORT}
@@ -1318,12 +1409,7 @@ obfs:
   salamander:
     password: ${obfs_pwd}
 
-masquerade:
-  type: proxy
-  proxy:
-    url: https://127.0.0.1:${CADDY_HTTPS_PORT}
-    rewriteHost: true
-    insecure: true
+${masquerade}
 EOF
   chmod 600 "${hysteria_conf}"
 
@@ -1375,34 +1461,58 @@ node_reality() {
     "${uuid}" "${domain}" "${REALITY_PORT}" "${domain}" "${pub}" "${sid}" "$(urlEncode "${domain} Reality")"
 }
 
+# cdn 形态：SNI/Host 用 CDN 域，连接地址优先用 CF 优选节点，否则直连 CDN 域
+# 输出 CDN_WS_HOST / CDN_WS_ADDR 供 node_* 复用
+cdn_wsvars() {
+  local domain
+  domain="$(state_get '.domain')"
+  CDN_WS_HOST="$(state_get '.sub.cdnDomain')"
+  if [ -z "${CDN_WS_HOST}" ] || [ "${CDN_WS_HOST}" == "${domain}" ]; then
+    CDN_WS_HOST="${domain}"
+    CDN_WS_ADDR="${domain}"
+    return 1
+  fi
+  CDN_WS_ADDR="$(state_get '.sub.cfNode')"
+  [ -z "${CDN_WS_ADDR}" ] && CDN_WS_ADDR="${CDN_WS_HOST}"
+  return 0
+}
+
 # node_vless_ws [direct|cdn]
 node_vless_ws() {
-  local mode="${1:-direct}" domain uuid path host
+  local mode="${1:-direct}" domain uuid path host addr name
   domain="$(state_get '.domain')"
   uuid="$(state_get '.xray.uuid')"
   path="$(state_get '.xray.ws.vlessPath')"
-  if [ "${mode}" == "cdn" ]; then
-    host="$(state_get '.sub.cfNode')"
+  if [ "${mode}" == "cdn" ] && cdn_wsvars; then
+    host="${CDN_WS_HOST}"
+    addr="${CDN_WS_ADDR}"
+    name="${host} WS-CDN"
   else
     host="${domain}"
+    addr="${domain}"
+    name="${domain} WS"
   fi
   printf 'vless://%s@%s:443?encryption=none&security=tls&sni=%s&fp=chrome&type=ws&host=%s&path=%s#%s' \
-    "${uuid}" "${host}" "${domain}" "${domain}" "$(urlEncode "${path}")" "$(urlEncode "${domain} WS")"
+    "${uuid}" "${addr}" "${host}" "${host}" "$(urlEncode "${path}")" "$(urlEncode "${name}")"
 }
 
 # node_trojan [direct|cdn]
 node_trojan() {
-  local mode="${1:-direct}" domain pwd path host
+  local mode="${1:-direct}" domain pwd path host addr name
   domain="$(state_get '.domain')"
   pwd="$(state_get '.xray.ws.trojanPassword')"
   path="$(state_get '.xray.ws.trojanPath')"
-  if [ "${mode}" == "cdn" ]; then
-    host="$(state_get '.sub.cfNode')"
+  if [ "${mode}" == "cdn" ] && cdn_wsvars; then
+    host="${CDN_WS_HOST}"
+    addr="${CDN_WS_ADDR}"
+    name="${host} Trojan-CDN"
   else
     host="${domain}"
+    addr="${domain}"
+    name="${domain} Trojan"
   fi
   printf 'trojan://%s@%s:443?security=tls&sni=%s&type=ws&host=%s&path=%s#%s' \
-    "${pwd}" "${host}" "${domain}" "${domain}" "$(urlEncode "${path}")" "$(urlEncode "${domain} Trojan")"
+    "${pwd}" "${addr}" "${host}" "${host}" "$(urlEncode "${path}")" "$(urlEncode "${name}")"
 }
 
 node_hysteria() {
@@ -1443,9 +1553,14 @@ show_links() {
 
   if [ "${cdn}" == "true" ]; then
     colorEcho "${YELLOW}" "===============分 享 链 接 (CDN)==============="
-    colorEcho "${LYELLOW}" "CF 节点: $(state_get '.sub.cfNode')"
-    printf "%s\n\n" "$(node_vless_ws cdn)"
-    printf "%s\n\n" "$(node_trojan cdn)"
+    if cdn_wsvars; then
+      colorEcho "${LYELLOW}" "CDN 域名: ${CDN_WS_HOST}"
+      colorEcho "${LYELLOW}" "连接地址: ${CDN_WS_ADDR}"
+      printf "%s\n\n" "$(node_vless_ws cdn)"
+      printf "%s\n\n" "$(node_trojan cdn)"
+    else
+      colorEcho "${YELLOW}" "尚未设置 CDN 域名，请先在 7) CDN 域名与开关 中配置"
+    fi
   fi
 
   colorEcho "${YELLOW}" "========================================"
@@ -1468,7 +1583,7 @@ sub_build_nodes() {
     state_set '.sub.nodes.ws' "$(json_quote "${n_ws}")"
     state_set '.sub.nodes.trojan' "$(json_quote "${n_trojan}")"
 
-    if [ "${cdn}" == "true" ]; then
+    if [ "${cdn}" == "true" ] && cdn_wsvars; then
       SUB_NODES+=("$(node_vless_ws cdn)" "$(node_trojan cdn)")
     fi
   fi
@@ -1532,12 +1647,17 @@ update_sub() {
 }
 
 display_sub() {
-  local domain uri sub_url qr_data
+  local domain uri sub_url qr_data cdn_domain
   if [ "$(state_get '.sub.enabled')" != "true" ]; then
     colorEcho "${YELLOW}" "你还没有生成订阅链接, 请先选择\"生成订阅\""
     return 1
   fi
   domain="$(state_get '.domain')"
+  cdn_domain="$(state_get '.sub.cdnDomain')"
+  # 开启 CDN 且已配置 CDN 域名时，订阅链接只给 CDN 域
+  if [ "$(state_get '.sub.cdn')" == "true" ] && [ -n "${cdn_domain}" ]; then
+    domain="${cdn_domain}"
+  fi
   uri="$(state_get '.sub.uri')"
   sub_url="https://${domain}/${uri}"
   qr_data="$(printf '%s' "sub://${sub_url}" | base64 --wrap=0)"
@@ -1557,39 +1677,108 @@ display_sub() {
   fi
 }
 
+# 读取 CDN 域名到 ASK_DOMAIN_RESULT，不做 IP 校验（橙云会解析到 Cloudflare 地址）
+ask_cdn_domain() {
+  local input
+  ASK_DOMAIN_RESULT=""
+  while true; do
+    read -rp "CDN 域名 (需已在 Cloudflare 开启橙云并回源本机): " input
+    if [ -z "${input}" ]; then
+      colorEcho "${YELLOW}" "未输入域名，已取消"
+      return 1
+    fi
+    if [ "${input}" == "$(state_get '.domain')" ]; then
+      colorEcho "${RED}" "CDN 域名不能与直连域名相同"
+      colorEcho "${RED}" "Reality 与 Hysteria2 必须绑定未经 CDN 的直连域名"
+      continue
+    fi
+    ASK_DOMAIN_RESULT="${input}"
+    return 0
+  done
+}
+
 toggle_cdn() {
-  local domain current cf_node choice
+  local domain cdn_domain current choice confirm
   domain="$(state_get '.domain')"
   if [ -z "${domain}" ]; then
     colorEcho "${RED}" "尚未设置域名，请先安装"
     return 1
   fi
-
+  cdn_domain="$(state_get '.sub.cdnDomain')"
   current="$(state_get '.sub.cdn')"
-  if [ "${current}" == "true" ]; then
-    colorEcho "${YELLOW}" "当前 CDN 入口已开启，关闭后 CDN 节点将从订阅中移除"
-    read -rp "确认关闭 CDN 入口 (Y/N)? " choice
-    case "${choice}" in
-      [yY] )
-        state_set '.sub.cdn' 'false'
-        colorEcho "${GREEN}" "CDN 入口已关闭"
-        ;;
-      * ) return 0 ;;
-    esac
+
+  echo ""
+  colorEcho "${YELLOW}" "直连域: ${domain}  -> Reality / Hysteria2（不经 CDN）"
+  if [ -n "${cdn_domain}" ]; then
+    if [ "${current}" == "true" ]; then
+      colorEcho "${YELLOW}" "CDN  域: ${cdn_domain}  -> VLESS-WS / Trojan-WS / 订阅（已启用）"
+    else
+      colorEcho "${YELLOW}" "CDN  域: ${cdn_domain}  -> VLESS-WS / Trojan-WS / 订阅（未启用）"
+    fi
   else
-    colorEcho "${YELLOW}" "开启后会在订阅中追加经由 Cloudflare 的备用入口"
-    colorEcho "${YELLOW}" "请确保域名己解析到 Cloudflare 并设置成 \"DNS Only\" (云朵为灰色)"
-    read -rp "确认开启 CDN 入口 (Y/N)? " choice
-    case "${choice}" in
-      [yY] )
-        cf_node="$(state_get '.sub.cfNode')"
-        [ -z "${cf_node}" ] && { cf_node="${cf_node_default}"; state_set '.sub.cfNode' "$(json_quote "${cf_node}")"; }
-        state_set '.sub.cdn' 'true'
-        colorEcho "${GREEN}" "CDN 入口已开启 (CF 节点: ${cf_node})"
-        ;;
-      * ) return 0 ;;
-    esac
+    colorEcho "${BLUE}" "CDN  域: 未设置"
   fi
+  echo ""
+  echo "1) 开启 / 更换 CDN 域名"
+  echo "2) 关闭 CDN 入口"
+  echo "3) 清除 CDN 域名"
+  echo "4) 返回"
+  echo ""
+  read -rp "选择操作 [输入任意值返回]: " choice
+
+  case "${choice}" in
+    "1")
+      if ! ask_cdn_domain; then
+        return 0
+      fi
+      cdn_domain="${ASK_DOMAIN_RESULT}"
+      colorEcho "${YELLOW}" "请确认已把 ${cdn_domain} 解析到 Cloudflare 并开启橙云（回源本机）"
+      colorEcho "${YELLOW}" "Reality 与 Hysteria2 仍使用直连域 ${domain}，不受影响"
+      read -rp "确认写入并重载 Caddy (Y/N)? " confirm
+      case "${confirm}" in
+        [yY]|[yY][eE][sS] ) ;;
+        * ) return 0 ;;
+      esac
+
+      state_set '.sub.cdnDomain' "$(json_quote "${cdn_domain}")"
+      state_set '.sub.cdn' 'true'
+      if set_caddyfile; then
+        systemctl restart caddy 2>&1 | writeLog >> "${log_path}"
+        colorEchoFlush "${BLUE}" "等待 ${cdn_domain} 证书签发\r"
+        if wait_caddy_cert "${cdn_domain}" no-state; then
+          colorEcho "${LGREEN}" "完成: ${cdn_domain} 证书已就绪"
+        else
+          colorEcho "${YELLOW}" "证书尚未就绪，请确认 Cloudflare 已放行 /.well-known 且 SSL 模式非 Off"
+        fi
+        colorEcho "${GREEN}" "CDN 入口已开启 (${cdn_domain})"
+      else
+        colorEcho "${RED}" "Caddyfile 生成失败，CDN 域名未生效"
+        return 1
+      fi
+      ;;
+
+    "2")
+      [ "${current}" == "true" ] || { colorEcho "${YELLOW}" "CDN 入口本就未开启"; return 0; }
+      state_set '.sub.cdn' 'false'
+      colorEcho "${GREEN}" "CDN 入口已关闭，节点恢复为直连域"
+      ;;
+
+    "3")
+      if [ -z "${cdn_domain}" ]; then
+        colorEcho "${YELLOW}" "尚未设置 CDN 域名"
+        return 0
+      fi
+      state_set '.sub.cdnDomain' '""'
+      state_set '.sub.cdn' 'false'
+      if set_caddyfile; then
+        systemctl restart caddy 2>&1 | writeLog >> "${log_path}"
+      fi
+      colorEcho "${GREEN}" "CDN 域名已清除"
+      cdn_domain=""
+      ;;
+
+    * ) return 0 ;;
+  esac
 
   if [ "$(state_get '.sub.enabled')" == "true" ]; then
     update_sub >/dev/null
@@ -1600,6 +1789,7 @@ toggle_cdn() {
 edit_cf_node() {
   local cf_node_current cf_node_new
   cf_node_current="$(state_get '.sub.cfNode')"
+  printf "%s\n" "CF 节点仅作为 CDN 节点的连接地址，SNI 与 Host 仍为 CDN 域名"
   printf "%s\n" "输入编号使用建议值"
   printf "1. %s\n" "icook.hk"
   printf "2. %s\n" "www.digitalocean.com"
@@ -1937,7 +2127,7 @@ show_menu() {
   echo "----------分享与订阅----------"
   echo "5) 显示分享链接"
   echo "6) 管理订阅"
-  echo "7) CDN 入口开关"
+  echo "7) CDN 域名与开关"
   echo "8) 自定义 Cloudflare 节点"
   echo "----------更新----------"
   echo "9) 更新 xray-core"
