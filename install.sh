@@ -9,7 +9,6 @@ branch="main"
 VERSION="1.0.0"
 REPO="Yanel85/xtwall"
 
-jsdelivr="cdn.jsdelivr.net/gh"
 gh_proxy="${XTWALL_GH_PROXY:-gh-proxy.phlin.workers.dev}"
 
 if [[ $(/usr/bin/id -u) -ne 0 ]]; then
@@ -55,7 +54,6 @@ fetch_repo() {
   local tmp="${dest}.part.$$"
   local url
   for url in \
-    "https://${jsdelivr}/${REPO}@${branch}/${path}" \
     "https://raw.githubusercontent.com/${REPO}/${branch}/${path}" \
     "https://${gh_proxy}/github.com/${REPO}/raw/${branch}/${path}"; do
     if curl -fsSL --connect-timeout 10 --retry 2 -o "${tmp}" "${url}" 2>/dev/null && [ -s "${tmp}" ]; then

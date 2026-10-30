@@ -24,7 +24,6 @@ warp_script="/usr/bin/warp"
 warp_download() {
   local dest="$1" tmp="${1}.part.$$" url
   for url in \
-    "https://cdn.jsdelivr.net/gh/fscarmen/warp-sh@main/warp.sh" \
     "https://raw.githubusercontent.com/fscarmen/warp-sh/main/warp.sh" \
     "https://${gh_proxy}/github.com/fscarmen/warp-sh/raw/main/warp.sh"; do
     if wget -q -O "${tmp}" "${url}" 2>/dev/null && [ -s "${tmp}" ]; then

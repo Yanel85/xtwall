@@ -79,7 +79,7 @@ tools/WARP.sh           WARP 管理（封装上游 fscarmen/warp-sh）
 2. **域名一致性**：直连域 = Caddy 主站 = Reality `serverNames` = Hysteria2 `sni`；CDN 域只需能通过 80 端口完成 HTTP-01 验证。两者不允许相同，脚本会拒绝。
 3. **证书**：由 Caddy 自动签发与续期，证书存放于 `/usr/local/etc/xtwall/caddy`；Hysteria2 只读取副本，每日 04:30 由 cron 同步。
 4. **端口**：Caddy 的 8443 仅监听 `127.0.0.1`，无需在防火墙放行；若使用云厂商安全组，只需放行 443/TCP、443/UDP、80/TCP。
-5. **镜像**：脚本下载仓库文件时依次尝试 jsdelivr → raw.githubusercontent.com → gh-proxy，可用环境变量 `XTWALL_GH_PROXY` 覆盖代理地址。
+5. **下载**：脚本优先从 GitHub 直链下载；直链失败时再尝试 gh-proxy。可用环境变量 `XTWALL_GH_PROXY` 覆盖代理地址。
 
 ## Credit
 

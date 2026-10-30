@@ -15,7 +15,6 @@ VERSION="1.0.0"
 REPO="Yanel85/xtwall"
 # 项目源码地址仅供脚本下载使用，不在终端输出。
 
-jsdelivr="cdn.jsdelivr.net/gh"
 gh_proxy="${XTWALL_GH_PROXY:-gh-proxy.phlin.workers.dev}"
 api_proxy="${XTWALL_API_PROXY:-gh-api.phlin.workers.dev}"
 
@@ -124,7 +123,6 @@ fetch_repo() {
   local tmp="${dest}.part.$$"
   local url
   for url in \
-    "https://${jsdelivr}/${REPO}@${branch}/${path}" \
     "https://raw.githubusercontent.com/${REPO}/${branch}/${path}" \
     "https://${gh_proxy}/github.com/${REPO}/raw/${branch}/${path}"; do
     if curl -fsSL --connect-timeout 10 --retry 2 -o "${tmp}" "${url}" 2>/dev/null && [ -s "${tmp}" ]; then
@@ -157,8 +155,8 @@ download_file() {
 download_release() {
   local dest="$1" path="$2"
   download_file "${dest}" \
-    "https://${gh_proxy}/github.com/${path}" \
-    "https://github.com/${path}"
+    "https://github.com/${path}" \
+    "https://${gh_proxy}/github.com/${path}"
 }
 
 urlEncode() {
