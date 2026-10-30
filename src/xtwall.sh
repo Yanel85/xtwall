@@ -73,6 +73,12 @@ writeLog() {
   done
 }
 
+# 保留被记录命令的退出码，避免管道只返回 writeLog 的成功状态
+run_logged() (
+  set -o pipefail
+  "$@" 2>&1 | writeLog >> "${log_path}"
+)
+
 die() {
   colorEcho "${RED}" "$*"
   exit 1
@@ -278,7 +284,7 @@ install_dependencies() {
   ${PACKAGE_MANAGEMENT_UPDATE} -y 2>&1 | writeLog >> "${log_path}"
   ${PACKAGE_MANAGEMENT_INSTALL} curl wget unzip jq lsof coreutils tar openssl -y 2>&1 | writeLog >> "${log_path}"
   local cmd
-  for cmd in curl jq unzip tar ss; do
+  for cmd in curl jq unzip tar lsof; do
     command -v "${cmd}" >/dev/null 2>&1 || die "error: 依赖 ${cmd} 安装失败"
   done
 }
@@ -403,8 +409,8 @@ state_init() {
 
 # 证书剩余天数，失败返回空
 cert_days_left() {
-  local cert_file
-  cert_file="$(state_get '.caddy.certPath')"
+  local cert_file="${1:-}"
+  [ -n "${cert_file}" ] || cert_file="$(state_get '.caddy.certPath')"
   if [ -z "${cert_file}" ] || [ ! -f "${cert_file}" ]; then
     echo ""
     return 1
@@ -739,7 +745,7 @@ http://${domain} {
 }
 EOF
 
-  if ! "${caddy_bin}" validate --config "${caddy_conf}" --adapter caddyfile 2>&1 | writeLog >> "${log_path}"; then
+  if ! run_logged "${caddy_bin}" validate --config "${caddy_conf}" --adapter caddyfile; then
     colorEcho "${RED}" "Caddyfile 校验失败"
     local bak
     bak="$(ls -1t "${caddy_conf}".bak.* 2>/dev/null | head -n 1)"
@@ -780,7 +786,7 @@ cert_status() {
   fi
 
   if [ -n "${cert_file}" ] && [ -f "${cert_file}" ]; then
-    days="$(cert_days_left)"
+    days="$(cert_days_left "${cert_file}")"
     printf "%s\t%s\t" "[Caddy]" "${domain}" | expand -t 16
     if [ -n "${days}" ] && [ "${days}" -gt 0 ]; then
       colorEcho "${GREEN}" "正常 (剩余 ${days} 天)"
@@ -1092,7 +1098,7 @@ EOF
 }
 
 xray_validate() {
-  if "${xray_bin}" run -test -confdir "${xray_conf_dir}" 2>&1 | writeLog >> "${log_path}"; then
+  if run_logged "${xray_bin}" run -test -confdir "${xray_conf_dir}"; then
     return 0
   fi
   colorEcho "${RED}" "xray 配置校验失败，正在回滚"
