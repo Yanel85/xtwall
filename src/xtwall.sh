@@ -895,7 +895,10 @@ set_caddyfile() {
   fi
 
   mkdir -p "$(dirname "${caddy_conf}")"
-  [ -f "${caddy_conf}" ] && cp -a "${caddy_conf}" "${caddy_conf}.bak.$(date +%s)"
+  # 只在最外层备份，避免降级重试时把无效配置变成回滚目标
+  if [ -f "${caddy_conf}" ] && [ "${with_fallback}" == "yes" ]; then
+    cp -a "${caddy_conf}" "${caddy_conf}.bak.$(date +%s)"
+  fi
 
   {
     cat <<EOF
