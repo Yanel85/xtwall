@@ -34,12 +34,13 @@ xtwall --cert-sync   # 同步 Caddy 证书到 Hysteria2（由 cron 每日调用�
           ├─ /ws   → 127.0.0.1:8080  VLESS over WS
           ├─ /tj   → 127.0.0.1:8081  Trojan over WS
           ├─ /sub  → 127.0.0.1:25500 subconverter（可选）
-          └─ /     → /var/www/html   mikutap 伪装站 + 订阅文件
+          └─ /     → /var/www/html   伪装站点模板 + 订阅文件
 80/TCP    Caddy（ACME HTTP-01 验证 + 301 跳转）
 ```
 
 Reality 的 `dest` 指向本地 Caddy，非 Reality 流量不会离开本机；对外只需放行 443/TCP 与 443/UDP（80 仅签发/续期证书时需要）。
 
+菜单中的“更新伪装站点模板”支持输入本地压缩包路径或下载 URL，压缩包需包含根目录 `index.html`，支持 ZIP、TAR、TAR.GZ 和 TGZ 格式。
 
 ## 目录结构
 

@@ -78,7 +78,7 @@ fi
 
 echo "下载主脚本 /usr/local/bin/xtwall"
 if ! fetch_repo "src/xtwall.sh" "/usr/local/bin/xtwall"; then
-  echo "error: 主脚本下载失败，请检查网络或仓库地址 ${REPO}"
+  echo "error: 主脚本下载失败，请检查网络连接后重试"
   exit 1
 fi
 chmod +x /usr/local/bin/xtwall

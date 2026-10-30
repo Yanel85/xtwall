@@ -13,7 +13,7 @@ export LANGUAGE=en_US.UTF-8
 branch="main"
 VERSION="1.0.0"
 REPO="Yanel85/xtwall"
-MIKUTAP_URL="https://github.com/Yanel85/mikutap/archive/refs/tags/v1.0.0.tar.gz"
+# 项目源码地址仅供脚本下载使用，不在终端输出。
 
 jsdelivr="cdn.jsdelivr.net/gh"
 gh_proxy="${XTWALL_GH_PROXY:-gh-proxy.phlin.workers.dev}"
@@ -44,7 +44,7 @@ WS_VLESS_PORT=8080
 WS_TROJAN_PORT=8081
 SUB_API_PORT=25500
 
-cf_node_default="icook.tw"
+cf_node_default="cf.090227.xyz"
 
 # ============================================================
 # 第2节 通用函数
@@ -394,6 +394,7 @@ state_init() {
       .sub.uri //= "" |
       .sub.cdn //= false |
       .sub.cfNode //= "'"${cf_node_default}"'" |
+      .sub.cfNode |= if . == "icook.tw" then "'"${cf_node_default}"'" else . end |
       .sub.nodes.reality //= "" |
       .sub.nodes.ws //= "" |
       .sub.nodes.trojan //= "" |
@@ -629,37 +630,17 @@ ask_domain() {
   return 0
 }
 
-# build_web [force]  部署 mikutap 伪装站点到 /var/www/html
+# build_web [force]  部署默认伪装站点模板到 /var/www/html
 build_web() {
   local force="${1:-}"
-  local tmp_dir src_dir
 
   if [ -f "${web_root}/index.html" ] && [ "${force}" != "force" ]; then
-    echo "Dummy website existed. Skip building."
+    echo "伪装站点模板已存在，跳过部署"
     return 0
   fi
 
   mkdir -p "${web_root}"
-  tmp_dir="$(mktemp -d)"
-
-  colorEchoFlush "${BLUE}" "下载 mikutap 伪装站点\r"
-  if download_file "${tmp_dir}/mikutap.tar.gz" \
-      "${MIKUTAP_URL}" \
-      "https://${gh_proxy}/github.com/Yanel85/mikutap/archive/refs/tags/v1.0.0.tar.gz"; then
-    if tar -xzf "${tmp_dir}/mikutap.tar.gz" -C "${tmp_dir}" 2>/dev/null; then
-      src_dir="$(find "${tmp_dir}" -maxdepth 1 -type d -name 'mikutap*' | head -n 1)"
-      [ -z "${src_dir}" ] && src_dir="${tmp_dir}"
-      cp -rf "${src_dir}/." "${web_root}/"
-      colorEcho "${LGREEN}" "完成: 部署 mikutap 伪装站点"
-    else
-      colorEcho "${YELLOW}" "mikutap 解压失败，使用内置单页"
-    fi
-  else
-    colorEcho "${YELLOW}" "mikutap 下载失败，使用内置单页"
-  fi
-
-  if [ ! -f "${web_root}/index.html" ]; then
-    cat > "${web_root}/index.html" <<-EOF
+  cat > "${web_root}/index.html" <<-EOF
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -671,12 +652,158 @@ build_web() {
 <body><h1>Hello World</h1></body>
 </html>
 EOF
+
+  printf 'User-agent: *\nDisallow: /\n' > "${web_root}/robots.txt"
+  chmod -R a+rX "${web_root}"
+  colorEcho "${LGREEN}" "默认伪装站点模板已部署"
+  return 0
+}
+
+validate_template_archive() {
+  local archive="$1" entries
+  case "${archive}" in
+    *.tar.gz|*.tgz)
+      entries="$(tar -tzf "${archive}" 2>/dev/null)" || return 1
+      tar -tvzf "${archive}" 2>/dev/null | awk '
+        substr($0, 1, 1) != "-" && substr($0, 1, 1) != "d" { bad = 1 }
+        END { exit bad }
+      ' || return 1
+      ;;
+    *.tar)
+      entries="$(tar -tf "${archive}" 2>/dev/null)" || return 1
+        tar -tvf "${archive}" 2>/dev/null | awk '
+          substr($0, 1, 1) != "-" && substr($0, 1, 1) != "d" { bad = 1 }
+          END { exit bad }
+        ' || return 1
+      ;;
+      *.zip)
+        entries="$(unzip -Z -1 "${archive}" 2>/dev/null)" || return 1
+        unzip -Z -l "${archive}" 2>/dev/null | awk '
+          $1 ~ /^l/ { bad = 1 }
+          END { exit bad }
+        ' || return 1
+      ;;
+    *)
+      colorEcho "${RED}" "不支持的压缩包格式，请使用 .zip、.tar、.tar.gz 或 .tgz"
+      return 1
+      ;;
+  esac
+
+  printf '%s\n' "${entries}" | awk '
+    /^\// { bad = 1 }
+    {
+      count = split($0, parts, "/")
+      for (i = 1; i <= count; i++) {
+        if (parts[i] == "..") bad = 1
+      }
+    }
+    END { exit bad }
+  '
+}
+
+update_web() {
+  local input archive_name archive_format archive_suffix tmp_dir extract_dir src_dir top_dir
+  read -rp "输入模板站压缩包本地路径或 URL: " input
+  [ -n "${input}" ] || { colorEcho "${YELLOW}" "未输入压缩包，已取消"; return 0; }
+
+  archive_format="${input%%\?*}"
+  archive_format="${archive_format%%\#*}"
+  case "${archive_format}" in
+    *.tar.gz) archive_suffix=".tar.gz" ;;
+    *.tgz) archive_suffix=".tgz" ;;
+    *.tar) archive_suffix=".tar" ;;
+    *.zip) archive_suffix=".zip" ;;
+    *)
+      colorEcho "${RED}" "不支持的压缩包格式，请使用 .zip、.tar、.tar.gz 或 .tgz"
+      return 1
+      ;;
+  esac
+
+  mkdir -p "$(dirname "${web_root}")"
+  tmp_dir="$(mktemp -d "$(dirname "${web_root}")/.xtwall-template.XXXXXX")" || {
+    colorEcho "${RED}" "无法创建模板站临时目录"
+    return 1
+  }
+  extract_dir="${tmp_dir}/extracted"
+  mkdir -p "${extract_dir}"
+
+  case "${input}" in
+    http://*|https://*)
+      archive_name="${tmp_dir}/template${archive_suffix}"
+      if ! download_file "${archive_name}" "${input}"; then
+        rm -rf "${tmp_dir}"
+        colorEcho "${RED}" "模板站压缩包下载失败"
+        return 1
+      fi
+      ;;
+    *)
+      if [ ! -f "${input}" ]; then
+        rm -rf "${tmp_dir}"
+        colorEcho "${RED}" "找不到压缩包: ${input}"
+        return 1
+      fi
+      archive_name="${input}"
+      ;;
+  esac
+
+  if ! validate_template_archive "${archive_name}"; then
+    rm -rf "${tmp_dir}"
+    colorEcho "${RED}" "压缩包无效或包含不安全路径"
+    return 1
   fi
 
-  echo -ne "User-agent: *\nDisallow: /\n" > "${web_root}/robots.txt"
-  chmod -R a+rX "${web_root}"
+  case "${archive_format}" in
+    *.tar.gz|*.tgz) tar -xzf "${archive_name}" -C "${extract_dir}" ;;
+    *.tar) tar -xf "${archive_name}" -C "${extract_dir}" ;;
+    *.zip) unzip -q "${archive_name}" -d "${extract_dir}" ;;
+    *)
+      rm -rf "${tmp_dir}"
+      colorEcho "${RED}" "不支持的压缩包格式，请使用 .zip、.tar、.tar.gz 或 .tgz"
+      return 1
+      ;;
+  esac
+  if [ $? -ne 0 ]; then
+    rm -rf "${tmp_dir}"
+    colorEcho "${RED}" "模板站压缩包解压失败"
+    return 1
+  fi
+
+  if [ -f "${extract_dir}/index.html" ]; then
+    src_dir="${extract_dir}"
+  else
+    top_dir="$(find "${extract_dir}" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+    if [ -z "${top_dir}" ] || [ ! -f "${top_dir}/index.html" ] \
+       || [ -n "$(find "${extract_dir}" -mindepth 1 -maxdepth 1 ! -type d -print -quit)" ] \
+       || [ -n "$(find "${extract_dir}" -mindepth 1 -maxdepth 1 -type d ! -path "${top_dir}" -print -quit)" ]; then
+      rm -rf "${tmp_dir}"
+      colorEcho "${RED}" "压缩包中未找到根目录或单一顶层目录下的 index.html"
+      return 1
+    fi
+    src_dir="${top_dir}"
+  fi
+
+  mkdir -p "${tmp_dir}/new-site"
+  cp -a "${src_dir}/." "${tmp_dir}/new-site/" || {
+    rm -rf "${tmp_dir}"
+    colorEcho "${RED}" "准备模板站文件失败"
+    return 1
+  }
+  chmod -R a+rX "${tmp_dir}/new-site"
+
+  if [ -e "${web_root}" ] && ! mv "${web_root}" "${tmp_dir}/old-site"; then
+    rm -rf "${tmp_dir}"
+    colorEcho "${RED}" "无法备份现有伪装站点"
+    return 1
+  fi
+  if ! mv "${tmp_dir}/new-site" "${web_root}"; then
+    [ -e "${tmp_dir}/old-site" ] && mv "${tmp_dir}/old-site" "${web_root}"
+    rm -rf "${tmp_dir}"
+    colorEcho "${RED}" "更新伪装站点模板失败，已尝试恢复旧站点"
+    return 1
+  fi
+
   rm -rf "${tmp_dir}"
-  return 0
+  colorEcho "${LGREEN}" "伪装站点模板更新完成"
 }
 
 set_caddyfile() {
@@ -1806,7 +1933,7 @@ show_menu() {
   echo "0) 一键安装 / 重新部署"
   echo "----------域名与证书----------"
   echo "3) 更换域名 (全链路同步)"
-  echo "4) 重建伪装站点 (mikutap)"
+  echo "4) 恢复默认伪装站点模板"
   echo "----------分享与订阅----------"
   echo "5) 显示分享链接"
   echo "6) 管理订阅"
@@ -1814,7 +1941,7 @@ show_menu() {
   echo "8) 自定义 Cloudflare 节点"
   echo "----------更新----------"
   echo "9) 更新 xray-core"
-  echo "10) 更新 caddy"
+  echo "10) 更新伪装站点模板"
   echo "11) 更新 hysteria"
   echo "----------运维----------"
   echo "12) 健康检查"
@@ -1826,7 +1953,6 @@ show_menu() {
 
 menu() {
   colorEcho "${YELLOW}" "xtwall - Reality + Hysteria2 automated script v${VERSION}"
-  colorEcho "${YELLOW}" "repo: https://github.com/${REPO}"
   echo ""
   check_status
 
@@ -1846,7 +1972,7 @@ menu() {
       "7") toggle_cdn && continue_prompt ;;
       "8") edit_cf_node && continue_prompt ;;
       "9") get_xray && continue_prompt ;;
-      "10") get_caddy && continue_prompt ;;
+      "10") update_web && continue_prompt ;;
       "11") get_hysteria && continue_prompt ;;
       "12") health_check && continue_prompt ;;
       "13") vps_tools ;;
