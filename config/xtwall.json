@@ -42,10 +42,6 @@
       "ws": "",
       "trojan": "",
       "hysteria": ""
-    },
-    "api": {
-      "installed": false,
-      "port": 25500
     }
   }
 }

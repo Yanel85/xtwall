@@ -30,7 +30,7 @@ xtwall --cert-sync   # 同步 Caddy 证书到 Hysteria2（由 cron 每日调用�
           └─ 非 Reality 握手原样中继 → 127.0.0.1:8443
 443/UDP   Hysteria2（QUIC，obfs salamander，SNI = 直连域）
 8443/TCP  Caddy（仅本机监听，按 SNI 选站点）
-          ├─ 直连域站点：/ws → 8080、/tj → 8081、/sub/<uri> → 订阅文件、/sub?... → 25500、/ → 伪装站
+          ├─ 直连域站点：/ws → 8080、/tj → 8081、/sub/<uri> → 订阅文件、/ → 伪装站
           ├─ CDN 域站点 ：与直连域站点路由一致
           └─ 兜底站点   ：供 Hysteria2 masquerade 使用
 80/TCP    Caddy（ACME HTTP-01 验证 + 301 跳转，两个域名各一个）
@@ -38,7 +38,9 @@ xtwall --cert-sync   # 同步 Caddy 证书到 Hysteria2（由 cron 每日调用�
 
 Reality 的 `dest` 指向本地 Caddy，非 Reality 流量不会离开本机；对外只需放行 443/TCP 与 443/UDP（80 仅签发/续期证书时需要，Cloudflare 回源也走 443/TCP）。
 
-订阅文件存放在 `/usr/local/etc/xtwall/sub`，由 Caddy 以 `/sub/<uri>` 直读该目录，因此替换伪装站点或清空 `/var/www/html` 都不会影响订阅链接；`/sub?url=...&target=` 仍由 subconverter 处理。
+订阅文件存放在 `/usr/local/etc/xtwall/sub`，由 Caddy 以 `/sub/<uri>` 直读该目录，因此替换伪装站点或清空 `/var/www/html` 都不会影响订阅链接。
+
+订阅为标准 base64 格式，v2rayN、NekoBox 等客户端可直接导入。Clash / Stash / QuantumultX / Loon 等需要格式转换的客户端，请自行使用第三方订阅转换服务：脚本不内置转换后端，也不会上传你的订阅，转换过程中的隐私风险由使用者自行承担。
 
 伪装站点默认为 mikutap 单页模板，可用 `XTWALL_WEB_TEMPLATE` 指向其他压缩包覆盖。菜单中的“更新伪装站点模板”支持输入本地压缩包路径或下载 URL（留空回车即恢复默认模板），压缩包需包含根目录 `index.html`，支持 ZIP、TAR、TAR.GZ 和 TGZ 格式。Hysteria2 的 masquerade 固定反代到本地兜底站点，不再退化为内置静态页。
 
@@ -60,7 +62,7 @@ Reality 的 `dest` 指向本地 Caddy，非 Reality 流量不会离开本机；�
 | 域名 | Cloudflare 状态 | 承载内容 |
 | :--- | :--- | :--- |
 | 直连域（安装时输入，必填） | 必须 `DNS Only`（灰云） | VLESS Reality、Hysteria2、Caddy 主站证书、直连形态分享链接 |
-| CDN 域（菜单 6 配置，可选） | 配置时必须开启灰云，配置完成开启橙云 | VLESS-WS、Trojan-WS、订阅链接、subconverter |
+| CDN 域（菜单 6 配置，可选） | 配置时必须开启灰云，配置完成开启橙云 | VLESS-WS、Trojan-WS、订阅链接 |
 
 原因：Reality 依赖真实 TLS 握手与 SNI 校验，Hysteria2 跑在 QUIC/UDP 上，二者**都无法经过 HTTP CDN**；而 WS 类协议与订阅页可以。
 
@@ -94,6 +96,7 @@ tools/WARP.sh           WARP 管理（封装上游 fscarmen/warp-sh）
 3. **证书**：由 Caddy 自动签发与续期，证书存放于 `/usr/local/etc/xtwall/caddy`；Hysteria2 只读取副本，每日 04:30 由 cron 同步。
 4. **端口**：Caddy 的 8443 仅监听 `127.0.0.1`，无需在防火墙放行；若使用云厂商安全组，只需放行 443/TCP、443/UDP、80/TCP。
 5. **下载**：脚本优先从 GitHub 直链下载；直链失败时再尝试 gh-proxy。可用环境变量 `XTWALL_GH_PROXY` 覆盖代理地址。
+6. **订阅转换**：脚本只输出 base64 订阅，不安装 Docker，也不内置转换服务；需要 Clash / QuanX / Loon 等格式时请自行使用第三方转换。订阅链接等同于节点凭据，请注意隐私。
 
 ## Credit
 

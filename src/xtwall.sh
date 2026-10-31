@@ -12,6 +12,8 @@ export LANGUAGE=en_US.UTF-8
 # ============================================================
 branch="main"
 VERSION="1.0.0"
+# 单调递增的构建号，仅用于更新检测：发布新版本时必须同时调大
+VERSION_CODE=1
 REPO="Yanel85/xtwall"
 # 项目源码地址仅供脚本下载使用，不在终端输出。
 
@@ -42,7 +44,6 @@ REALITY_PORT=443
 CADDY_HTTPS_PORT=8443
 WS_VLESS_PORT=8080
 WS_TROJAN_PORT=8081
-SUB_API_PORT=25500
 
 # 默认伪装站点模板：mikutap 单页小游戏（可用 XTWALL_WEB_TEMPLATE 覆盖）
 web_template_url="${XTWALL_WEB_TEMPLATE:-https://github.com/Yanel85/mikutap/archive/refs/tags/v1.0.0.tar.gz}"
@@ -391,10 +392,6 @@ state_default() {
       "ws": "",
       "trojan": "",
       "hysteria": ""
-    },
-    "api": {
-      "installed": false,
-      "port": ${SUB_API_PORT}
     }
   }
 }
@@ -453,9 +450,7 @@ state_init() {
       .sub.nodes.ws //= "" |
       .sub.nodes.trojan //= "" |
       del(.xray.ws.ssPort, .xray.ws.ssPath, .xray.ws.ssPassword, .sub.nodes.ss) |
-      .sub.nodes.hysteria //= "" |
-      .sub.api.installed //= false |
-      .sub.api.port //= '"${SUB_API_PORT}"'
+      .sub.nodes.hysteria //= ""
     ' "${config_path}" > "${tmp}" 2>/dev/null; then
     chmod 600 "${tmp}"
     mv -f "${tmp}" "${config_path}"
@@ -970,12 +965,6 @@ https://${d}:${CADDY_HTTPS_PORT} {
 		root * ${sub_dir}
 		uri strip_prefix /sub
 		file_server
-	}
-
-	# subconverter API：/sub?url=...&target=...
-	@subapi path /sub*
-	handle @subapi {
-		reverse_proxy 127.0.0.1:${SUB_API_PORT}
 	}
 
 	@vlessws path ${vless_path}
@@ -1800,17 +1789,6 @@ display_sub() {
 
   printf "%s\n" "${sub_url}"
   printf '%s\n\n' "二维码: https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${qr_data}"
-
-  if [ "$(state_get '.sub.api.installed')" == "true" ]; then
-    local api_prefix
-    api_prefix="https://${domain}/sub?url=$(urlEncode "${sub_url}")&target="
-    colorEcho "${YELLOW}" "Clash"
-    printf "%s\n" "${api_prefix}clash"
-    colorEcho "${YELLOW}" "QuantumultX"
-    printf "%s\n" "${api_prefix}quanx"
-    colorEcho "${YELLOW}" "Loon"
-    printf "%s\n\n" "${api_prefix}loon"
-  fi
 }
 
 # 读取 CDN 域名到 ASK_DOMAIN_RESULT，不做 IP 校验（橙云会解析到 Cloudflare 地址）
@@ -1818,7 +1796,7 @@ ask_cdn_domain() {
   local input
   ASK_DOMAIN_RESULT=""
   while true; do
-    read -rp "CDN 域名 (需已在 Cloudflare 开启橙云并回源本机): " input
+    read -rp "CDN 域名 (配置时必须开启灰云，配置完成开启橙云): " input
     if [ -z "${input}" ]; then
       colorEcho "${YELLOW}" "未输入域名，已取消"
       return 1
@@ -1949,28 +1927,6 @@ edit_cf_node() {
   show_links
 }
 
-get_docker() {
-  if [ ! -x "$(command -v docker)" ]; then
-    colorEchoFlush "${BLUE}" "安装 docker\r"
-    curl -sL https://get.docker.com/ | bash 2>&1 | writeLog >> "${log_path}"
-  fi
-}
-
-sub_api() {
-  if [ "$(state_get '.sub.enabled')" != "true" ]; then
-    colorEcho "${RED}" "你还没有生成订阅链接"
-    return 1
-  fi
-  get_docker
-  if ! docker ps -q --filter ancestor=tindy2013/subconverter >/dev/null 2>&1; then
-    docker rm $(docker stop $(docker ps -q --filter ancestor=tindy2013/subconverter) 2>/dev/null) 2>/dev/null
-    docker run -d --restart=always -p 127.0.0.1:${SUB_API_PORT}:25500 tindy2013/subconverter:latest 2>&1 | writeLog >> "${log_path}"
-  fi
-  state_set '.sub.api.installed' 'true'
-  colorEcho "${LGREEN}" "多客户端订阅 API 已启用"
-  display_sub
-}
-
 sub_menu() {
   local opt
   while true; do
@@ -1978,15 +1934,13 @@ sub_menu() {
     echo "1) 生成订阅"
     echo "2) 更新订阅"
     echo "3) 显示订阅"
-    echo "4) 启用多客户端 API (Clash/QuanX)"
-    echo "5) 回主菜单"
+    echo "4) 回主菜单"
     echo ""
     read -rp "选择操作 [输入任意值返回]: " opt
     case "${opt}" in
       "1") gen_sub ;;
       "2") update_sub ;;
       "3") display_sub ;;
-      "4") sub_api ;;
       *) return 0 ;;
     esac
   done
@@ -2327,6 +2281,64 @@ health_check() {
   printf "\n"
 }
 
+update_self() {
+  local bin tmp stage new_ver new_code
+  bin="$(command -v xtwall 2>/dev/null)"
+  [ -z "${bin}" ] && bin="/usr/local/bin/xtwall"
+  if [ ! -f "${bin}" ]; then
+    colorEcho "${RED}" "未找到已安装的 xtwall: ${bin}"
+    return 1
+  fi
+  tmp="/tmp/xtwall.sh.$$"
+  colorEcho "${BLUE}" "正在获取最新脚本..."
+  if ! fetch_repo "src/xtwall.sh" "${tmp}"; then
+    rm -f "${tmp}"
+    colorEcho "${RED}" "脚本下载失败, 请检查网络后重试"
+    return 1
+  fi
+  if ! bash -n "${tmp}" 2>/dev/null; then
+    rm -f "${tmp}"
+    colorEcho "${RED}" "下载的脚本语法校验失败, 已放弃更新"
+    return 1
+  fi
+  new_ver="$(sed -n 's/^VERSION="\(.*\)"$/\1/p' "${tmp}" | head -n 1)"
+  new_code="$(sed -n 's/^VERSION_CODE=\([0-9][0-9]*\)$/\1/p' "${tmp}" | head -n 1)"
+  if [ -z "${new_ver}" ]; then
+    rm -f "${tmp}"
+    colorEcho "${RED}" "下载的脚本没有版本信息, 已放弃更新"
+    return 1
+  fi
+  # 有构建号时以构建号为准，兼容远端尚未引入 VERSION_CODE 的旧格式
+  if [ -n "${new_code}" ]; then
+    if [ "${new_code}" -le "${VERSION_CODE}" ]; then
+      rm -f "${tmp}"
+      colorEcho "${GREEN}" "已是最新版本 v${VERSION} (构建号 ${VERSION_CODE}), 无需更新"
+      return 0
+    fi
+  elif [ "${new_ver}" == "${VERSION}" ]; then
+    rm -f "${tmp}"
+    colorEcho "${GREEN}" "已是最新版本 v${VERSION}, 无需更新"
+    return 0
+  fi
+  # 先暂存到目标同目录再 rename，避免跨文件系统覆盖正在运行的脚本
+  stage="$(dirname "${bin}")/.xtwall.new.$$"
+  if ! cp -f "${tmp}" "${stage}" || ! chmod +x "${stage}"; then
+    rm -f "${tmp}" "${stage}"
+    colorEcho "${RED}" "写入新脚本失败, 原脚本未改动"
+    return 1
+  fi
+  rm -f "${tmp}"
+  cp -f "${bin}" "${bin}.bak" 2>/dev/null
+  if ! mv -f "${stage}" "${bin}"; then
+    rm -f "${stage}"
+    colorEcho "${RED}" "替换脚本失败, 原脚本未改动"
+    return 1
+  fi
+  colorEcho "${GREEN}" "脚本已更新: v${VERSION} (构建号 ${VERSION_CODE}) -> v${new_ver} (构建号 ${new_code})"
+  state_set '.version' "$(json_quote "${new_ver}")" 2>/dev/null || true
+  colorEcho "${YELLOW}" "重新执行 xtwall 后生效, 旧版本已备份为 ${bin}.bak"
+}
+
 vps_tools() {
   local t="${config_dir}/tools/vps_tools.sh"
   if [ ! -f "${t}" ]; then
@@ -2375,8 +2387,9 @@ show_menu() {
   echo "11) 更新 hysteria"
   echo "12) 健康检查"
   echo "13) VPS 工具"
-  echo "14) 卸载 xtwall"
+  echo "14) 更新脚本"
   echo "15) 退出"
+  echo "91) 卸载 xtwall"
   echo ""
 }
 
@@ -2402,8 +2415,9 @@ menu() {
       "11") get_hysteria && continue_prompt ;;
       "12") health_check && continue_prompt ;;
       "13") vps_tools ;;
-      "14") rm_xtwall ;;
+      "14") update_self ;;
       "15") exit 0 ;;
+      "91") rm_xtwall ;;
       *) exit 0 ;;
     esac
   done
@@ -2425,7 +2439,7 @@ main() {
     --cert-sync) cert_sync ;;
     --status)
       check_status
-      exit 0
+      exit 0·
       ;;
     *)
       menu

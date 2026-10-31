@@ -72,6 +72,18 @@ if [ -f "/usr/local/bin/hysteria" ]; then
   colorEcho ${GREEN} "Removed hysteria successfully."
 fi
 
+# ---------- 订阅转换容器与镜像 ----------
+if command -v docker >/dev/null 2>&1; then
+  colorEcho ${BLUE} "Removing subconverter container and image."
+  sub_ids="$(${sudoCmd} docker ps -aq --filter ancestor=tindy2013/subconverter 2>/dev/null)"
+  [ -n "${sub_ids}" ] && ${sudoCmd} docker rm -f ${sub_ids} >/dev/null 2>&1
+  sub_ids="$(${sudoCmd} docker ps -aq --filter name=xtwall-subconverter 2>/dev/null)"
+  [ -n "${sub_ids}" ] && ${sudoCmd} docker rm -f ${sub_ids} >/dev/null 2>&1
+  if ${sudoCmd} docker image inspect tindy2013/subconverter:latest >/dev/null 2>&1; then
+    ${sudoCmd} docker rmi -f tindy2013/subconverter:latest >/dev/null 2>&1
+  fi
+fi
+
 # ---------- 订阅产物与伪装站点 ----------
 colorEcho ${BLUE} "Removing subscription files."
 for f in /var/www/html/*; do
