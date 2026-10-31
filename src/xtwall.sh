@@ -173,13 +173,9 @@ urlDecode() {
   printf '%s' "${1//%/\\x}"
 }
 
+# 操作完成后直接回到主菜单，不再询问
 continue_prompt() {
-  local choice
-  read -rp "继续其他操作 (Y/N)? " choice
-  case "${choice}" in
-    [yY] ) return 0 ;;
-    * ) exit 0;;
-  esac
+  return 0
 }
 
 # port_in_use [port] [tcp|udp]
@@ -798,6 +794,13 @@ deploy_web_archive() {
       rm -rf "${tmp_dir}"
       colorEcho "${RED}" "caddy 重新启动失败，排查: journalctl -u caddy -n 50"
       return 1
+    fi
+  fi
+
+  # 订阅文件写在 web_root 下，替换模板目录会一并删除，这里重新写入
+  if [ "$(state_get '.sub.enabled')" == "true" ] && [ -n "$(state_get '.sub.uri')" ]; then
+    if sub_build_nodes 2>/dev/null; then
+      sub_write_file "$(state_get '.sub.uri')"
     fi
   fi
 

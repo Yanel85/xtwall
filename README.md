@@ -58,7 +58,7 @@ XTWALL_TLS_MODE=internal bash <(curl -sL https://raw.githubusercontent.com/Yanel
 - `80/tcp`：可终止占用进程，或选择跳过 http 站点（写入 `caddy.httpBlock=false`，放弃 ACME HTTP-01 与 301 跳转）；待 80 重新空闲后再执行安装会自动恢复该站点
 - `443/tcp`、`443/udp`、`8443`、`8080`、`8081`：无法回落，必须终止占用进程或手动释放，否则中止安装
 
-运行中替换伪装站点模板时，脚本会短暂停止 caddy 再原子替换 `/var/www/html`，替换完成后自动拉起（caddy 的 `ReadWritePaths` 会以 bind mount 占住该目录，无法直接重命名）。
+运行中替换伪装站点模板时，脚本会短暂停止 caddy 再原子替换 `/var/www/html`，替换完成后自动拉起（caddy 的 `ReadWritePaths` 会以 bind mount 占住该目录，无法直接重命名），并重新写入订阅文件，订阅链接不会失效。
 
 ## 两个域名模型
 
