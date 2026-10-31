@@ -249,8 +249,11 @@ identify_the_operating_system_and_architecture() {
     die "error: 请不要使用过旧的 Linux 发行版"
   fi
 
-  if [[ -z "$(ls -l /sbin/init 2>/dev/null | grep systemd)" ]]; then
-    die "error: 仅支持使用 systemd 的 Linux 发行版"
+  local init_process
+  init_process="$(cat /proc/1/comm 2>/dev/null)"
+  if [[ "${init_process}" != "systemd" ]] || [[ ! -d "/run/systemd/system" ]] \
+     || ! systemctl show-environment >/dev/null 2>&1; then
+    die "error: systemd 服务管理器不可用；请在 systemd 主机上安装，不支持以普通 shell 作为 PID 1 的容器"
   fi
 
   if [[ "$(command -v apt)" ]]; then
@@ -1459,7 +1462,7 @@ node_reality() {
   pub="$(state_get '.xray.reality.publicKey')"
   sid="$(state_get '.xray.reality.shortId')"
   printf 'vless://%s@%s:%s?encryption=none&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp&flow=xtls-rprx-vision#%s' \
-    "${uuid}" "${domain}" "${REALITY_PORT}" "${domain}" "${pub}" "${sid}" "$(urlEncode "${domain} Reality")"
+    "${uuid}" "${domain}" "${REALITY_PORT}" "${domain}" "${pub}" "${sid}" "$(urlEncode "VLESS-Reality")"
 }
 
 # cdn 形态：SNI/Host 用 CDN 域，连接地址优先用 CF 优选节点，否则直连 CDN 域
@@ -1487,11 +1490,11 @@ node_vless_ws() {
   if [ "${mode}" == "cdn" ] && cdn_wsvars; then
     host="${CDN_WS_HOST}"
     addr="${CDN_WS_ADDR}"
-    name="${host} WS-CDN"
+    name="VLESS-WS-CDN"
   else
     host="${domain}"
     addr="${domain}"
-    name="${domain} WS"
+    name="VLESS-WS"
   fi
   printf 'vless://%s@%s:443?encryption=none&security=tls&sni=%s&fp=chrome&type=ws&host=%s&path=%s#%s' \
     "${uuid}" "${addr}" "${host}" "${host}" "$(urlEncode "${path}")" "$(urlEncode "${name}")"
@@ -1506,11 +1509,11 @@ node_trojan() {
   if [ "${mode}" == "cdn" ] && cdn_wsvars; then
     host="${CDN_WS_HOST}"
     addr="${CDN_WS_ADDR}"
-    name="${host} Trojan-CDN"
+    name="Trojan-WS-CDN"
   else
     host="${domain}"
     addr="${domain}"
-    name="${domain} Trojan"
+    name="Trojan-WS"
   fi
   printf 'trojan://%s@%s:443?security=tls&sni=%s&type=ws&host=%s&path=%s#%s' \
     "${pwd}" "${addr}" "${host}" "${host}" "$(urlEncode "${path}")" "$(urlEncode "${name}")"
@@ -1522,7 +1525,7 @@ node_hysteria() {
   pwd="$(state_get '.hysteria.password')"
   obfs="$(state_get '.hysteria.obfsPassword')"
   printf 'hysteria2://%s@%s:%s/?sni=%s&obfs=salamander&obfs-password=%s#%s' \
-    "$(urlEncode "${pwd}")" "${domain}" "${REALITY_PORT}" "${domain}" "${obfs}" "$(urlEncode "${domain} Hysteria2")"
+    "$(urlEncode "${pwd}")" "${domain}" "${REALITY_PORT}" "${domain}" "${obfs}" "$(urlEncode "Hysteria2")"
 }
 
 show_links() {
