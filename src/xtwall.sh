@@ -47,9 +47,6 @@ SUB_API_PORT=25500
 # 默认伪装站点模板：mikutap 单页小游戏（可用 XTWALL_WEB_TEMPLATE 覆盖）
 web_template_url="${XTWALL_WEB_TEMPLATE:-https://github.com/Yanel85/mikutap/archive/refs/tags/v1.0.0.tar.gz}"
 
-# 证书签发模式：acme（默认，公网域名）| internal（本地测试，Caddy 本地 CA）
-tls_mode_default="${XTWALL_TLS_MODE:-acme}"
-
 cf_node_default="cf.090227.xyz"
 
 # ============================================================
@@ -358,7 +355,6 @@ state_default() {
     "installed": false,
     "httpsPort": ${CADDY_HTTPS_PORT},
     "certPath": "",
-    "tlsMode": "${tls_mode_default}",
     "httpBlock": true
   },
   "xray": {
@@ -431,7 +427,6 @@ state_init() {
       .caddy.installed //= false |
       .caddy.httpsPort //= '"${CADDY_HTTPS_PORT}"' |
       .caddy.certPath //= "" |
-      .caddy.tlsMode //= "'"${tls_mode_default}"'" |
       .caddy.httpBlock //= true |
       .xray.installed //= false |
       .xray.uuid //= "" |
@@ -505,7 +500,7 @@ cert_days_left() {
   end_ts="$(date -d "${end_date}" +%s 2>/dev/null)"
   now_ts="$(date +%s)"
   [ -z "${end_ts}" ] && { echo ""; return 1; }
-  # 向上取整，避免不足 24 小时的短证书（如 Caddy 本地 CA 的 12 小时证书）被判为已过期
+  # 向上取整，避免不足 24 小时的短周期证书被误判为已过期
   echo $(( (end_ts - now_ts + 86399) / 86400 ))
 }
 
@@ -571,11 +566,6 @@ check_status() {
     else
       colorEcho "${RED}" "已过期"
     fi
-  fi
-
-  if [ "$(state_get '.caddy.tlsMode')" == "internal" ]; then
-    printf "证书模式: "
-    colorEcho "${YELLOW}" "internal (Caddy 本地 CA，客户端需信任或跳过校验)"
   fi
 
   if [[ ! $(cat /proc/swaps 2>/dev/null | wc -l) -gt 1 ]]; then
@@ -962,24 +952,18 @@ update_web() {
 
 caddy_site_block() {
   # caddy_site_block [域名] [vless path] [trojan path]
-  local d="$1" vless_path="$2" trojan_path="$3" tls_block
-  if [ "$(state_get '.caddy.tlsMode')" == "internal" ]; then
-    # 本地测试：Caddy 本地 CA 签发短证书，无需公网 80 回源
-    tls_block="	tls internal"
-  else
-    tls_block="	tls {
-		issuer acme {
-			disable_tlsalpn_challenge
-		}
-	}"
-  fi
+  local d="$1" vless_path="$2" trojan_path="$3"
   cat <<EOF
 
 # ${d}: 伪装站与 WS 反代，由 Reality dest 回落或 CDN 回源命中
 https://${d}:${CADDY_HTTPS_PORT} {
 	bind 127.0.0.1
 	encode zstd gzip
-${tls_block}
+	tls {
+		issuer acme {
+			disable_tlsalpn_challenge
+		}
+	}
 
 	# 订阅文件：/sub/<uri> 直读独立目录，与伪装站目录解耦
 	handle /sub/* {
@@ -1167,11 +1151,6 @@ cert_status() {
     colorEcho "${GREEN}" "运行中"
   else
     colorEcho "${RED}" "未运行"
-  fi
-
-  if [ "$(state_get '.caddy.tlsMode')" == "internal" ]; then
-    printf "%s\t%s\t" "[模式]" "internal" | expand -t 16
-    colorEcho "${YELLOW}" "Caddy 本地 CA（客户端需信任该 CA 或跳过校验）"
   fi
 
   printf "\n"
@@ -2106,7 +2085,7 @@ resolve_port_conflicts() {
 
   if [ "${skipped_http}" == "1" ]; then
     state_set '.caddy.httpBlock' 'false'
-    colorEcho "${YELLOW}" "已跳过 80 站点：ACME HTTP-01 将不可用，请改用本地测试证书或自行提供证书"
+    colorEcho "${YELLOW}" "已跳过 80 站点：ACME HTTP-01 将不可用，证书需自行提供（443/tcp 仍可正常工作）"
   fi
   return 0
 }
@@ -2197,12 +2176,6 @@ install_all() {
   state_set '.domain' "$(json_quote "${domain}")"
   echo "install for domain ${domain}" | writeLog >> "${log_path}"
 
-  # 本地测试开关：XTWALL_TLS_MODE=internal 时改用 Caddy 本地 CA 签发
-  if [ "${XTWALL_TLS_MODE:-}" == "internal" ]; then
-    state_set '.caddy.tlsMode' '"internal"'
-    colorEcho "${YELLOW}" "证书模式: internal（Caddy 本地 CA，仅适合本地测试）"
-  fi
-
   colorEchoFlush "${BLUE}" "部署伪装站点\r"
   build_web force || return 1
 
@@ -2221,8 +2194,6 @@ install_all() {
   colorEchoFlush "${BLUE}" "等待证书签发\r"
   if wait_caddy_cert "${domain}"; then
     colorEcho "${LGREEN}" "完成: 证书签发"
-  elif [ "$(state_get '.caddy.tlsMode')" == "internal" ]; then
-    colorEcho "${YELLOW}" "本地 CA 证书未就绪，请检查: journalctl -u caddy -n 50"
   else
     colorEcho "${YELLOW}" "证书尚未就绪，请检查域名解析与 80 端口后执行\"证书巡检\""
   fi
@@ -2386,89 +2357,26 @@ rm_xtwall() {
 # ============================================================
 # 第11节 入口
 # ============================================================
-# 切换证书签发模式：acme（公网域名）<-> internal（Caddy 本地 CA，本地测试）
-toggle_tls_mode() {
-  if [ "$(state_get '.caddy.installed')" != "true" ]; then
-    colorEcho "${YELLOW}" "请先安装 xtwall"
-    return 1
-  fi
-  if [ -z "$(state_get '.domain')" ]; then
-    colorEcho "${YELLOW}" "尚未设置域名"
-    return 1
-  fi
-
-  local cur target confirm
-  cur="$(state_get '.caddy.tlsMode')"
-  [ -z "${cur}" ] && cur="acme"
-
-  if [ "${cur}" == "internal" ]; then
-    target="acme"
-    colorEcho "${YELLOW}" "当前: internal。切回 acme 需要域名解析到本机且 80 端口可被 CA 回源"
-  else
-    target="internal"
-    colorEcho "${YELLOW}" "当前: acme。切换后使用 Caddy 本地 CA，客户端需信任该 CA 或跳过校验"
-  fi
-
-  read -rp "确认切换为 ${target} (Y/N)? " confirm
-  case "${confirm}" in
-    [yY] ) ;;
-    * ) colorEcho "${YELLOW}" "已取消"; return 0 ;;
-  esac
-
-  state_set '.caddy.tlsMode' "$(json_quote "${target}")"
-  if ! set_caddyfile; then
-    state_set '.caddy.tlsMode' "$(json_quote "${cur}")"
-    colorEcho "${RED}" "Caddyfile 生成失败，已回滚为 ${cur}"
-    return 1
-  fi
-
-  systemctl restart caddy 2>&1 | writeLog >> "${log_path}"
-  if ! service_up caddy; then
-    colorEcho "${RED}" "caddy 启动失败，排查: journalctl -u caddy -n 50"
-    return 1
-  fi
-
-  if wait_caddy_cert "$(state_get '.domain')"; then
-    colorEcho "${LGREEN}" "完成: 证书已就绪 (${target})"
-  else
-    colorEcho "${YELLOW}" "证书尚未就绪，可稍后执行\"证书巡检\""
-  fi
-
-  cert_sync || colorEcho "${YELLOW}" "证书同步失败，Hysteria2 可能无法启动"
-  systemctl restart hysteria 2>&1 | writeLog >> "${log_path}"
-
-  if [ "${target}" == "internal" ]; then
-    colorEcho "${YELLOW}" "本地 CA 根证书: ${caddy_cert_root}/pki/authorities/local/root.crt"
-    colorEcho "${YELLOW}" "该 CA 签发的证书默认仅 12 小时，建议用 cron 定时执行 xtwall --cert-sync"
-  fi
-  return 0
-}
-
 show_menu() {
   echo ""
   echo "----------状态----------"
   echo "1) 状态总览"
   echo "2) 证书巡检"
-  echo "----------安装----------"
-  echo "0) 一键安装 / 重新部署"
-  echo "----------域名与证书----------"
-  echo "3) 更换域名 (全链路同步)"
-  echo "4) 恢复默认伪装站点模板"
   echo "----------分享与订阅----------"
-  echo "5) 显示分享链接"
-  echo "6) 管理订阅"
-  echo "7) CDN 域名与开关"
-  echo "8) 自定义 Cloudflare 节点"
-  echo "----------更新----------"
+  echo "3) 更换域名 (全链路同步)"
+  echo "4) 显示分享链接"
+  echo "5) 管理订阅"
+  echo "6) CDN 域名与开关"
+  echo "7) 自定义 Cloudflare 节点"
+  echo "----------更新&运维----------"
+  echo "8) 一键安装 / 重新部署"
   echo "9) 更新 xray-core"
   echo "10) 更新伪装站点模板"
   echo "11) 更新 hysteria"
-  echo "----------运维----------"
   echo "12) 健康检查"
   echo "13) VPS 工具"
-  echo "14) 本地测试证书 (tls internal) 开关"
-  echo "15) 卸载 xtwall"
-  echo "16) 退出"
+  echo "14) 卸载 xtwall"
+  echo "15) 退出"
   echo ""
 }
 
@@ -2483,23 +2391,21 @@ menu() {
     show_menu
     read -rp "选择操作 [输入任意值退出]: " opt
     case "${opt}" in
-      "0") install_all && continue_prompt ;;
       "1") check_status && continue_prompt ;;
       "2") cert_status && continue_prompt ;;
       "3") change_domain && continue_prompt ;;
-      "4") build_web force && continue_prompt ;;
-      "5") show_links && continue_prompt ;;
-      "6") sub_menu && continue_prompt ;;
-      "7") toggle_cdn && continue_prompt ;;
-      "8") edit_cf_node && continue_prompt ;;
+      "4") show_links && continue_prompt ;;
+      "5") sub_menu && continue_prompt ;;
+      "6") toggle_cdn && continue_prompt ;;
+      "7") edit_cf_node && continue_prompt ;;
+      "8") install_all && continue_prompt ;;
       "9") get_xray && continue_prompt ;;
       "10") update_web && continue_prompt ;;
       "11") get_hysteria && continue_prompt ;;
       "12") health_check && continue_prompt ;;
       "13") vps_tools ;;
-      "14") toggle_tls_mode && continue_prompt ;;
-      "15") rm_xtwall ;;
-      "16") exit 0 ;;
+      "14") rm_xtwall ;;
+      "15") exit 0 ;;
       *) exit 0 ;;
     esac
   done

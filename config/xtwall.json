@@ -6,7 +6,6 @@
     "installed": false,
     "httpsPort": 8443,
     "certPath": "",
-    "tlsMode": "acme",
     "httpBlock": true
   },
   "xray": {

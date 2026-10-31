@@ -43,15 +43,9 @@ Reality 的 `dest` 指向本地 Caddy，非 Reality 流量不会离开本机；�
 
 伪装站点默认为 mikutap 单页模板，可用 `XTWALL_WEB_TEMPLATE` 指向其他压缩包覆盖。菜单中的“更新伪装站点模板”支持输入本地压缩包路径或下载 URL（留空回车即恢复默认模板），压缩包需包含根目录 `index.html`，支持 ZIP、TAR、TAR.GZ 和 TGZ 格式。Hysteria2 的 masquerade 固定反代到本地兜底站点，不再退化为内置静态页。
 
-## 本地测试
+## 证书要求
 
-域名解析到私网地址时无法通过 ACME 回源（Let's Encrypt 会直接拒绝），可改用 Caddy 本地 CA 签发：
-
-```sh
-XTWALL_TLS_MODE=internal bash <(curl -sL https://raw.githubusercontent.com/Yanel85/xtwall/main/install.sh)
-```
-
-安装后也可通过菜单“本地测试证书 (tls internal) 开关”随时切换。注意本地 CA 证书默认仅 12 小时有效期，需配合定时 `xtwall --cert-sync`，且客户端要信任该 CA 根证书或跳过校验。
+证书由 Caddy 通过 ACME HTTP-01 自动签发，域名必须解析到本机公网地址、且 80 端口能被 CA 回源。解析到私网地址（例如 `*.nip.io` 指向内网 IP）时 Let's Encrypt 会直接拒绝，无法签发。
 
 ## 端口冲突处理
 
@@ -67,13 +61,13 @@ XTWALL_TLS_MODE=internal bash <(curl -sL https://raw.githubusercontent.com/Yanel
 | 域名 | Cloudflare 状态 | 承载内容 |
 | :--- | :--- | :--- |
 | 直连域（安装时输入，必填） | 必须 `DNS Only`（灰云） | VLESS Reality、Hysteria2、Caddy 主站证书、直连形态分享链接 |
-| CDN 域（菜单 7 配置，可选） | 必须开启橙云 | VLESS-WS、Trojan-WS、订阅链接、subconverter |
+| CDN 域（菜单 6 配置，可选） | 必须开启橙云 | VLESS-WS、Trojan-WS、订阅链接、subconverter |
 
 原因：Reality 依赖真实 TLS 握手与 SNI 校验，Hysteria2 跑在 QUIC/UDP 上，二者**都无法经过 HTTP CDN**；而 WS 类协议与订阅页可以。
 
 Caddy 只在 `127.0.0.1:8443` 监听，按 SNI 选择站点：Reality 把非认证握手原样中继过来时命中直连域站点，Cloudflare 回源带的是 CDN 域 SNI，命中 CDN 域站点。两个站点共享同一个伪装站目录与 WS 反代，各自独立签发证书。
 
-订阅链接在开启 CDN 后只给出 CDN 域；关闭后回到直连域。CF 优选节点（菜单 8）仅作为 CDN 节点的**连接地址**，SNI 与 Host 始终是 CDN 域。
+订阅链接在开启 CDN 后只给出 CDN 域；关闭后回到直连域。CF 优选节点（菜单 7）仅作为 CDN 节点的**连接地址**，SNI 与 Host 始终是 CDN 域。
 
 ## 目录结构
 
