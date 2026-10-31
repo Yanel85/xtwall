@@ -406,7 +406,8 @@ EOF
 }
 
 state_init() {
-  mkdir -p "${config_dir}" "${hysteria_cert_dir}"
+  # sub_dir 必须存在：caddy 服务的 ReadWriteDirectories 引用它，缺失会导致启动失败(226/NAMESPACE)
+  mkdir -p "${config_dir}" "${hysteria_cert_dir}" "${sub_dir}"
 
   if [ ! -f "${config_path}" ]; then
     if ! fetch_repo "config/xtwall.json" "${config_path}" 2>/dev/null; then
@@ -642,7 +643,7 @@ get_caddy() {
   tag_num="${latest_version#v}"
   pkg="caddy_${tag_num}_linux_${BIN_ARCH}.tar.gz"
 
-  mkdir -p "$(dirname "${caddy_conf}")" "${caddy_cert_root}" "${web_root}"
+  mkdir -p "$(dirname "${caddy_conf}")" "${caddy_cert_root}" "${web_root}" "${sub_dir}"
 
   colorEchoFlush "${BLUE}" "获取 caddy ${latest_version}\r"
   tmp_dir="$(mktemp -d)"
@@ -2110,6 +2111,19 @@ resolve_port_conflicts() {
   return 0
 }
 
+# service_up [服务名]  确认服务真正进入 active
+# 注意：systemctl is-active 在 activating 阶段同样返回 0，会把启动失败误判为成功
+service_up() {
+  local svc="$1" i state
+  for i in 1 2 3 4 5; do
+    state="$(systemctl show -p ActiveState "${svc}" 2>/dev/null | cut -d= -f2)"
+    [ "${state}" == "active" ] && return 0
+    [ "${state}" == "failed" ] && return 1
+    sleep 1
+  done
+  return 1
+}
+
 migrate_from_old() {
   local svc legacy=()
   for svc in nginx trojan-go tls-shunt-proxy mtg v2ray shadowsocks-libev; do
@@ -2199,7 +2213,7 @@ install_all() {
   set_caddyfile || return 1
 
   systemctl restart caddy 2>&1 | writeLog >> "${log_path}"
-  if ! systemctl is-active --quiet caddy; then
+  if ! service_up caddy; then
     colorEcho "${RED}" "caddy 启动失败，排查: journalctl -u caddy -n 50"
     return 1
   fi
@@ -2220,7 +2234,7 @@ install_all() {
   set_xray_config || return 1
   xray_validate || return 1
   systemctl restart xray 2>&1 | writeLog >> "${log_path}"
-  if ! systemctl is-active --quiet xray; then
+  if ! service_up xray; then
     colorEcho "${RED}" "xray 启动失败，排查: journalctl -u xray -n 50"
     return 1
   fi
@@ -2230,7 +2244,7 @@ install_all() {
   cert_sync || colorEcho "${YELLOW}" "证书同步失败，Hysteria2 可能无法启动"
   set_hysteria_config || return 1
   systemctl restart hysteria 2>&1 | writeLog >> "${log_path}"
-  if ! systemctl is-active --quiet hysteria; then
+  if ! service_up hysteria; then
     colorEcho "${RED}" "hysteria 启动失败，排查: journalctl -u hysteria -n 50"
     return 1
   fi
@@ -2409,7 +2423,7 @@ toggle_tls_mode() {
   fi
 
   systemctl restart caddy 2>&1 | writeLog >> "${log_path}"
-  if ! systemctl is-active --quiet caddy; then
+  if ! service_up caddy; then
     colorEcho "${RED}" "caddy 启动失败，排查: journalctl -u caddy -n 50"
     return 1
   fi
