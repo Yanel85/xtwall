@@ -23,6 +23,7 @@ log_path="/var/log/xtwall.log"
 config_dir="/usr/local/etc/xtwall"
 config_path="${config_dir}/config.json"
 caddy_cert_root="${config_dir}/caddy"
+sub_dir="${config_dir}/sub"
 web_root="/var/www/html"
 
 xray_bin="/usr/local/bin/xray"
@@ -466,6 +467,26 @@ state_init() {
     rm -f "${tmp}"
   fi
   chmod 600 "${config_path}"
+
+  # 迁移：订阅文件已从 web_root 移到 sub_dir，旧文件直接搬过去
+  local legacy_uri
+  legacy_uri="$(state_get '.sub.uri')"
+  if [ -n "${legacy_uri}" ] && [ -f "${web_root}/${legacy_uri}" ]; then
+    mkdir -p "${sub_dir}"
+    chmod 755 "${sub_dir}"
+    if mv -f "${web_root}/${legacy_uri}" "${sub_dir}/${legacy_uri}" 2>/dev/null; then
+      chmod 644 "${sub_dir}/${legacy_uri}"
+    fi
+  fi
+
+  # 迁移：旧 Caddyfile 缺少 /sub 静态路由时自动重建并重载
+  if [ -x "${caddy_bin}" ] && [ -f "${caddy_conf}" ] && [ -n "$(state_get '.domain')" ] \
+     && ! grep -q "strip_prefix /sub" "${caddy_conf}" 2>/dev/null; then
+    if set_caddyfile >/dev/null 2>&1; then
+      systemctl reload caddy >/dev/null 2>&1 || systemctl restart caddy >/dev/null 2>&1
+      colorEcho "${YELLOW}" "已更新 Caddyfile：订阅文件改由 /sub/<uri> 提供"
+    fi
+  fi
 }
 
 # 证书剩余天数，失败返回空
@@ -535,7 +556,7 @@ check_status() {
       sub_domain="${cdn_domain}"
     fi
     printf "订阅链接: "
-    colorEcho "${GREEN}" "https://${sub_domain}/${sub_uri}"
+    colorEcho "${GREEN}" "https://${sub_domain}/sub/${sub_uri}"
   fi
 
   local days
@@ -605,7 +626,7 @@ TimeoutStopSec=5s
 LimitNOFILE=1048576
 PrivateTmp=true
 ProtectSystem=full
-${rw_key}=${caddy_cert_root} ${web_root}
+${rw_key}=${caddy_cert_root} ${web_root} ${sub_dir}
 Restart=on-failure
 RestartPreventExitStatus=1
 
@@ -797,13 +818,6 @@ deploy_web_archive() {
     fi
   fi
 
-  # 订阅文件写在 web_root 下，替换模板目录会一并删除，这里重新写入
-  if [ "$(state_get '.sub.enabled')" == "true" ] && [ -n "$(state_get '.sub.uri')" ]; then
-    if sub_build_nodes 2>/dev/null; then
-      sub_write_file "$(state_get '.sub.uri')"
-    fi
-  fi
-
   rm -rf "${tmp_dir}"
   return 0
 }
@@ -966,6 +980,14 @@ https://${d}:${CADDY_HTTPS_PORT} {
 	encode zstd gzip
 ${tls_block}
 
+	# 订阅文件：/sub/<uri> 直读独立目录，与伪装站目录解耦
+	handle /sub/* {
+		root * ${sub_dir}
+		uri strip_prefix /sub
+		file_server
+	}
+
+	# subconverter API：/sub?url=...&target=...
 	@subapi path /sub*
 	handle @subapi {
 		reverse_proxy 127.0.0.1:${SUB_API_PORT}
@@ -1734,9 +1756,10 @@ sub_build_nodes() {
 
 sub_write_file() {
   local uri="$1"
-  mkdir -p "${web_root}"
-  printf '%s\n' "${SUB_NODES[@]}" | base64 --wrap=0 > "${web_root}/${uri}"
-  chmod 644 "${web_root}/${uri}"
+  mkdir -p "${sub_dir}"
+  chmod 755 "${sub_dir}"
+  printf '%s\n' "${SUB_NODES[@]}" | base64 --wrap=0 > "${sub_dir}/${uri}"
+  chmod 644 "${sub_dir}/${uri}"
 }
 
 gen_sub() {
@@ -1752,8 +1775,8 @@ gen_sub() {
 
   local old_uri new_uri
   old_uri="$(state_get '.sub.uri')"
-  if [ -n "${old_uri}" ] && [ -f "${web_root}/${old_uri}" ]; then
-    rm -f "${web_root}/${old_uri}"
+  if [ -n "${old_uri}" ]; then
+    rm -f "${sub_dir}/${old_uri}" "${web_root}/${old_uri}"
   fi
 
   new_uri="$(random_hex 16)"
@@ -1792,7 +1815,7 @@ display_sub() {
     domain="${cdn_domain}"
   fi
   uri="$(state_get '.sub.uri')"
-  sub_url="https://${domain}/${uri}"
+  sub_url="https://${domain}/sub/${uri}"
   qr_data="$(printf '%s' "sub://${sub_url}" | base64 --wrap=0)"
 
   printf "%s\n" "${sub_url}"

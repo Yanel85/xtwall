@@ -31,13 +31,15 @@ xtwall --cert-sync   # 同步 Caddy 证书到 Hysteria2（由 cron 每日调用�
           └─ 非 Reality 握手原样中继 → 127.0.0.1:8443
 443/UDP   Hysteria2（QUIC，obfs salamander，SNI = 直连域）
 8443/TCP  Caddy（仅本机监听，按 SNI 选站点）
-          ├─ 直连域站点：/ws → 8080、/tj → 8081、/ → 伪装站
-          ├─ CDN 域站点 ：/ws → 8080、/tj → 8081、/sub → 25500、/ → 伪装站
+          ├─ 直连域站点：/ws → 8080、/tj → 8081、/sub/<uri> → 订阅文件、/sub?... → 25500、/ → 伪装站
+          ├─ CDN 域站点 ：与直连域站点路由一致
           └─ 兜底站点   ：供 Hysteria2 masquerade 使用
 80/TCP    Caddy（ACME HTTP-01 验证 + 301 跳转，两个域名各一个）
 ```
 
 Reality 的 `dest` 指向本地 Caddy，非 Reality 流量不会离开本机；对外只需放行 443/TCP 与 443/UDP（80 仅签发/续期证书时需要，Cloudflare 回源也走 443/TCP）。
+
+订阅文件存放在 `/usr/local/etc/xtwall/sub`，由 Caddy 以 `/sub/<uri>` 直读该目录，因此替换伪装站点或清空 `/var/www/html` 都不会影响订阅链接；`/sub?url=...&target=` 仍由 subconverter 处理。
 
 伪装站点默认为 mikutap 单页模板，可用 `XTWALL_WEB_TEMPLATE` 指向其他压缩包覆盖。菜单中的“更新伪装站点模板”支持输入本地压缩包路径或下载 URL（留空回车即恢复默认模板），压缩包需包含根目录 `index.html`，支持 ZIP、TAR、TAR.GZ 和 TGZ 格式。Hysteria2 的 masquerade 固定反代到本地兜底站点，不再退化为内置静态页。
 
