@@ -5,7 +5,9 @@
   "caddy": {
     "installed": false,
     "httpsPort": 8443,
-    "certPath": ""
+    "certPath": "",
+    "tlsMode": "acme",
+    "httpBlock": true
   },
   "xray": {
     "installed": false,

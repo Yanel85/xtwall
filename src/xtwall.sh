@@ -43,6 +43,12 @@ WS_VLESS_PORT=8080
 WS_TROJAN_PORT=8081
 SUB_API_PORT=25500
 
+# 默认伪装站点模板：mikutap 单页小游戏（可用 XTWALL_WEB_TEMPLATE 覆盖）
+web_template_url="${XTWALL_WEB_TEMPLATE:-https://github.com/Yanel85/mikutap/archive/refs/tags/v1.0.0.tar.gz}"
+
+# 证书签发模式：acme（默认，公网域名）| internal（本地测试，Caddy 本地 CA）
+tls_mode_default="${XTWALL_TLS_MODE:-acme}"
+
 cf_node_default="cf.090227.xyz"
 
 # ============================================================
@@ -181,7 +187,7 @@ port_in_use() {
   local port="$1" proto="${2:-tcp}"
   if command -v ss >/dev/null 2>&1; then
     if [[ "${proto}" == "udp" ]]; then
-      ss -lunp 2>/dev/null | awk 'NR>1 {print $5}' | grep -qE "[:.]${port}$"
+      ss -lunp 2>/dev/null | awk 'NR>1 {print $4}' | grep -qE "[:.]${port}$"
     else
       ss -ltnp 2>/dev/null | awk 'NR>1 {print $4}' | grep -qE "[:.]${port}$"
     fi
@@ -192,6 +198,55 @@ port_in_use() {
       lsof -nP -iTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1
     fi
   fi
+}
+
+# port_owner [port] [tcp|udp]  输出占用该端口的进程描述
+port_owner() {
+  local port="$1" proto="${2:-tcp}" out=""
+  local flag="-ltnp"
+  [ "${proto}" == "udp" ] && flag="-lunp"
+  if command -v ss >/dev/null 2>&1; then
+    out="$(ss ${flag} 2>/dev/null | awk -v p=":${port}\$" 'NR>1 && $4 ~ p' | grep -oE 'users:\(\(.*\)\)' | head -n 1)"
+  fi
+  if [ -z "${out}" ] && command -v lsof >/dev/null 2>&1; then
+    out="$(lsof -nP -i"${proto^^}:${port}" 2>/dev/null | awk 'NR>1 {print $1"("$2")"}' | sort -u | paste -sd ',' -)"
+  fi
+  printf '%s' "${out:-未知进程}"
+}
+
+# kill_port_owner [port] [tcp|udp]  终止占用端口的进程（不动 xtwall 自身组件）
+kill_port_owner() {
+  local port="$1" proto="${2:-tcp}" pids pid name
+  local flag="-ltnp"
+  [ "${proto}" == "udp" ] && flag="-lunp"
+
+  if command -v ss >/dev/null 2>&1; then
+    pids="$(ss ${flag} 2>/dev/null | awk -v p=":${port}\$" 'NR>1 && $4 ~ p' \
+      | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u)"
+  fi
+  [ -z "${pids}" ] && pids="$(lsof -t -nP -i"${proto^^}:${port}" 2>/dev/null | sort -u)"
+
+  for pid in ${pids}; do
+    name="$(ps -o comm= -p "${pid}" 2>/dev/null)"
+    case "${name}" in
+      caddy|xray|hysteria)
+        colorEcho "${YELLOW}" "跳过 xtwall 组件 ${name}(${pid})"
+        continue
+        ;;
+    esac
+    echo "kill ${name}(${pid}) holding ${port}/${proto}" | writeLog >> "${log_path}"
+    kill -TERM "${pid}" 2>/dev/null
+  done
+
+  sleep 2
+  for pid in ${pids}; do
+    if kill -0 "${pid}" 2>/dev/null; then
+      name="$(ps -o comm= -p "${pid}" 2>/dev/null)"
+      case "${name}" in caddy|xray|hysteria) continue ;; esac
+      kill -KILL "${pid}" 2>/dev/null
+    fi
+  done
+  sleep 1
 }
 
 # 生成随机字符串（不依赖 uuid 文件）
@@ -305,7 +360,9 @@ state_default() {
   "caddy": {
     "installed": false,
     "httpsPort": ${CADDY_HTTPS_PORT},
-    "certPath": ""
+    "certPath": "",
+    "tlsMode": "${tls_mode_default}",
+    "httpBlock": true
   },
   "xray": {
     "installed": false,
@@ -376,6 +433,8 @@ state_init() {
       .caddy.installed //= false |
       .caddy.httpsPort //= '"${CADDY_HTTPS_PORT}"' |
       .caddy.certPath //= "" |
+      .caddy.tlsMode //= "'"${tls_mode_default}"'" |
+      .caddy.httpBlock //= true |
       .xray.installed //= false |
       .xray.uuid //= "" |
       .xray.reality.privateKey //= "" |
@@ -428,7 +487,8 @@ cert_days_left() {
   end_ts="$(date -d "${end_date}" +%s 2>/dev/null)"
   now_ts="$(date +%s)"
   [ -z "${end_ts}" ] && { echo ""; return 1; }
-  echo $(( (end_ts - now_ts) / 86400 ))
+  # 向上取整，避免不足 24 小时的短证书（如 Caddy 本地 CA 的 12 小时证书）被判为已过期
+  echo $(( (end_ts - now_ts + 86399) / 86400 ))
 }
 
 check_status() {
@@ -495,6 +555,11 @@ check_status() {
     fi
   fi
 
+  if [ "$(state_get '.caddy.tlsMode')" == "internal" ]; then
+    printf "证书模式: "
+    colorEcho "${YELLOW}" "internal (Caddy 本地 CA，客户端需信任或跳过校验)"
+  fi
+
   if [[ ! $(cat /proc/swaps 2>/dev/null | wc -l) -gt 1 ]]; then
     colorEcho "${YELLOW}" "检测到 Swap 未开启 建议启用"
   fi
@@ -518,6 +583,13 @@ latest_tag() {
 }
 
 set_caddy_systemd() {
+  # ReadWritePaths 需要 systemd 231+；旧版（如 CentOS 7 的 219）用 ReadWriteDirectories
+  local rw_key=ReadWritePaths systemd_ver
+  systemd_ver="$(systemctl --version 2>/dev/null | head -n 1 | awk '{print $2}')"
+  if [ -n "${systemd_ver}" ] && [ "${systemd_ver}" -lt 231 ] 2>/dev/null; then
+    rw_key=ReadWriteDirectories
+  fi
+
   cat > "/etc/systemd/system/caddy.service" <<-EOF
 [Unit]
 Description=Caddy web server
@@ -537,7 +609,7 @@ TimeoutStopSec=5s
 LimitNOFILE=1048576
 PrivateTmp=true
 ProtectSystem=full
-ReadWritePaths=${caddy_cert_root} ${web_root}
+${rw_key}=${caddy_cert_root} ${web_root}
 Restart=on-failure
 RestartPreventExitStatus=1
 
@@ -640,31 +712,138 @@ ask_domain() {
 }
 
 # build_web [force]  部署默认伪装站点模板到 /var/www/html
+# deploy_web_archive [压缩包路径] [后缀]
+# 校验并解压模板站压缩包，原子替换 ${web_root}；失败时保留旧站点
+deploy_web_archive() {
+  local archive="$1" suffix="$2"
+  local tmp_dir extract_dir src_dir top_dir new_root
+
+  if ! validate_template_archive "${archive}"; then
+    colorEcho "${RED}" "压缩包无效或包含不安全路径"
+    return 1
+  fi
+
+  tmp_dir="$(mktemp -d "$(dirname "${web_root}")/.xtwall-template.XXXXXX")" || {
+    colorEcho "${RED}" "无法创建模板站临时目录"
+    return 1
+  }
+  extract_dir="${tmp_dir}/extracted"
+  mkdir -p "${extract_dir}"
+
+  case "${suffix}" in
+    .tar.gz|.tgz) tar -xzf "${archive}" -C "${extract_dir}" ;;
+    .tar) tar -xf "${archive}" -C "${extract_dir}" ;;
+    .zip) unzip -q "${archive}" -d "${extract_dir}" ;;
+  esac
+  if [ $? -ne 0 ]; then
+    rm -rf "${tmp_dir}"
+    colorEcho "${RED}" "模板站压缩包解压失败"
+    return 1
+  fi
+
+  if [ -f "${extract_dir}/index.html" ]; then
+    src_dir="${extract_dir}"
+  else
+    top_dir="$(find "${extract_dir}" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+    if [ -z "${top_dir}" ] || [ ! -f "${top_dir}/index.html" ] \
+       || [ -n "$(find "${extract_dir}" -mindepth 1 -maxdepth 1 ! -type d -print -quit)" ] \
+       || [ -n "$(find "${extract_dir}" -mindepth 1 -maxdepth 1 -type d ! -path "${top_dir}" -print -quit)" ]; then
+      rm -rf "${tmp_dir}"
+      colorEcho "${RED}" "压缩包中未找到根目录或单一顶层目录下的 index.html"
+      return 1
+    fi
+    src_dir="${top_dir}"
+  fi
+
+  new_root="${tmp_dir}/new-site"
+  mkdir -p "${new_root}"
+  cp -a "${src_dir}/." "${new_root}/" || {
+    rm -rf "${tmp_dir}"
+    colorEcho "${RED}" "准备模板站文件失败"
+    return 1
+  }
+  printf 'User-agent: *\nDisallow: /\n' > "${new_root}/robots.txt"
+  chmod -R a+rX "${new_root}"
+
+  if [ ! -e "${web_root}" ]; then
+    if ! mv "${new_root}" "${web_root}"; then
+      rm -rf "${tmp_dir}"
+      colorEcho "${RED}" "部署伪装站点模板失败"
+      return 1
+    fi
+  else
+    # 运行中的 caddy 会以 bind mount 占住 web_root（ReadWritePaths），目录无法整体重命名，
+    # 因此先停止 caddy，替换完成后再启动
+    local caddy_was_active=0
+    if systemctl is-active --quiet caddy 2>/dev/null; then
+      caddy_was_active=1
+      colorEchoFlush "${BLUE}" "暂停 caddy 以替换站点目录\r"
+      systemctl stop caddy 2>&1 | writeLog >> "${log_path}"
+    fi
+
+    if ! mv "${web_root}" "${tmp_dir}/old-site"; then
+      rm -rf "${tmp_dir}"
+      [ "${caddy_was_active}" -eq 1 ] && systemctl start caddy 2>&1 | writeLog >> "${log_path}"
+      colorEcho "${RED}" "无法备份现有伪装站点"
+      return 1
+    fi
+    if ! mv "${new_root}" "${web_root}"; then
+      mv "${tmp_dir}/old-site" "${web_root}"
+      rm -rf "${tmp_dir}"
+      [ "${caddy_was_active}" -eq 1 ] && systemctl start caddy 2>&1 | writeLog >> "${log_path}"
+      colorEcho "${RED}" "部署伪装站点模板失败，已尝试恢复旧站点"
+      return 1
+    fi
+    if [ "${caddy_was_active}" -eq 1 ] && ! systemctl start caddy 2>/dev/null; then
+      rm -rf "${tmp_dir}"
+      colorEcho "${RED}" "caddy 重新启动失败，排查: journalctl -u caddy -n 50"
+      return 1
+    fi
+  fi
+
+  rm -rf "${tmp_dir}"
+  return 0
+}
+
+# 默认模板的镜像地址（GitHub 直链失败时改用 gh_proxy）
+web_template_mirror() {
+  case "${web_template_url}" in
+    https://github.com/*)
+      printf '%s' "https://${gh_proxy}/github.com/${web_template_url#https://github.com/}"
+      ;;
+  esac
+}
+
+# build_web [force]  下载并部署默认模板（mikutap）到 ${web_root}
 build_web() {
-  local force="${1:-}"
+  local force="${1:-}" tmp_dir archive
 
   if [ -f "${web_root}/index.html" ] && [ "${force}" != "force" ]; then
     echo "伪装站点模板已存在，跳过部署"
     return 0
   fi
 
-  mkdir -p "${web_root}"
-  cat > "${web_root}/index.html" <<-EOF
-<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Welcome</title>
-<style>body{margin:0;height:100vh;display:flex;align-items:center;justify-content:center;font-family:system-ui,sans-serif;background:#0f172a;color:#e2e8f0}</style>
-</head>
-<body><h1>Hello World</h1></body>
-</html>
-EOF
+  mkdir -p "$(dirname "${web_root}")" "${web_root}"
+  tmp_dir="$(mktemp -d "$(dirname "${web_root}")/.xtwall-template.XXXXXX")" || {
+    colorEcho "${RED}" "无法创建模板站临时目录"
+    return 1
+  }
+  archive="${tmp_dir}/template.tar.gz"
 
-  printf 'User-agent: *\nDisallow: /\n' > "${web_root}/robots.txt"
-  chmod -R a+rX "${web_root}"
-  colorEcho "${LGREEN}" "默认伪装站点模板已部署"
+  colorEchoFlush "${BLUE}" "下载伪装站点模板 (mikutap)\r"
+  if ! download_file "${archive}" "${web_template_url}" "$(web_template_mirror)"; then
+    rm -rf "${tmp_dir}"
+    colorEcho "${RED}" "伪装站点模板下载失败，请检查网络后重试"
+    return 1
+  fi
+
+  if ! deploy_web_archive "${archive}" ".tar.gz"; then
+    rm -rf "${tmp_dir}"
+    return 1
+  fi
+
+  rm -rf "${tmp_dir}"
+  colorEcho "${LGREEN}" "伪装站点模板已部署 (mikutap)"
   return 0
 }
 
@@ -711,9 +890,10 @@ validate_template_archive() {
 }
 
 update_web() {
-  local input archive_name archive_format archive_suffix tmp_dir extract_dir src_dir top_dir
+  local input archive_name archive_format archive_suffix tmp_dir
+  colorEcho "${YELLOW}" "留空直接回车 = 使用默认模板 (mikutap)"
   read -rp "输入模板站压缩包本地路径或 URL: " input
-  [ -n "${input}" ] || { colorEcho "${YELLOW}" "未输入压缩包，已取消"; return 0; }
+  [ -n "${input}" ] || { build_web force; return $?; }
 
   archive_format="${input%%\?*}"
   archive_format="${archive_format%%\#*}"
@@ -733,8 +913,6 @@ update_web() {
     colorEcho "${RED}" "无法创建模板站临时目录"
     return 1
   }
-  extract_dir="${tmp_dir}/extracted"
-  mkdir -p "${extract_dir}"
 
   case "${input}" in
     http://*|https://*)
@@ -755,59 +933,8 @@ update_web() {
       ;;
   esac
 
-  if ! validate_template_archive "${archive_name}"; then
+  if ! deploy_web_archive "${archive_name}" "${archive_suffix}"; then
     rm -rf "${tmp_dir}"
-    colorEcho "${RED}" "压缩包无效或包含不安全路径"
-    return 1
-  fi
-
-  case "${archive_format}" in
-    *.tar.gz|*.tgz) tar -xzf "${archive_name}" -C "${extract_dir}" ;;
-    *.tar) tar -xf "${archive_name}" -C "${extract_dir}" ;;
-    *.zip) unzip -q "${archive_name}" -d "${extract_dir}" ;;
-    *)
-      rm -rf "${tmp_dir}"
-      colorEcho "${RED}" "不支持的压缩包格式，请使用 .zip、.tar、.tar.gz 或 .tgz"
-      return 1
-      ;;
-  esac
-  if [ $? -ne 0 ]; then
-    rm -rf "${tmp_dir}"
-    colorEcho "${RED}" "模板站压缩包解压失败"
-    return 1
-  fi
-
-  if [ -f "${extract_dir}/index.html" ]; then
-    src_dir="${extract_dir}"
-  else
-    top_dir="$(find "${extract_dir}" -mindepth 1 -maxdepth 1 -type d -print -quit)"
-    if [ -z "${top_dir}" ] || [ ! -f "${top_dir}/index.html" ] \
-       || [ -n "$(find "${extract_dir}" -mindepth 1 -maxdepth 1 ! -type d -print -quit)" ] \
-       || [ -n "$(find "${extract_dir}" -mindepth 1 -maxdepth 1 -type d ! -path "${top_dir}" -print -quit)" ]; then
-      rm -rf "${tmp_dir}"
-      colorEcho "${RED}" "压缩包中未找到根目录或单一顶层目录下的 index.html"
-      return 1
-    fi
-    src_dir="${top_dir}"
-  fi
-
-  mkdir -p "${tmp_dir}/new-site"
-  cp -a "${src_dir}/." "${tmp_dir}/new-site/" || {
-    rm -rf "${tmp_dir}"
-    colorEcho "${RED}" "准备模板站文件失败"
-    return 1
-  }
-  chmod -R a+rX "${tmp_dir}/new-site"
-
-  if [ -e "${web_root}" ] && ! mv "${web_root}" "${tmp_dir}/old-site"; then
-    rm -rf "${tmp_dir}"
-    colorEcho "${RED}" "无法备份现有伪装站点"
-    return 1
-  fi
-  if ! mv "${tmp_dir}/new-site" "${web_root}"; then
-    [ -e "${tmp_dir}/old-site" ] && mv "${tmp_dir}/old-site" "${web_root}"
-    rm -rf "${tmp_dir}"
-    colorEcho "${RED}" "更新伪装站点模板失败，已尝试恢复旧站点"
     return 1
   fi
 
@@ -817,18 +944,24 @@ update_web() {
 
 caddy_site_block() {
   # caddy_site_block [域名] [vless path] [trojan path]
-  local d="$1" vless_path="$2" trojan_path="$3"
+  local d="$1" vless_path="$2" trojan_path="$3" tls_block
+  if [ "$(state_get '.caddy.tlsMode')" == "internal" ]; then
+    # 本地测试：Caddy 本地 CA 签发短证书，无需公网 80 回源
+    tls_block="	tls internal"
+  else
+    tls_block="	tls {
+		issuer acme {
+			disable_tlsalpn_challenge
+		}
+	}"
+  fi
   cat <<EOF
 
 # ${d}: 伪装站与 WS 反代，由 Reality dest 回落或 CDN 回源命中
 https://${d}:${CADDY_HTTPS_PORT} {
 	bind 127.0.0.1
 	encode zstd gzip
-	tls {
-		issuer acme {
-			disable_tlsalpn_challenge
-		}
-	}
+${tls_block}
 
 	@subapi path /sub*
 	handle @subapi {
@@ -878,9 +1011,8 @@ EOF
 }
 
 set_caddyfile() {
-  # set_caddyfile [yes|no]  no 表示不生成兜底站点（旧版 caddy 不支持时自动降级）
-  local domain email vless_path trojan_path cdn_domain with_fallback
-  with_fallback="${1:-yes}"
+  # 生成 Caddyfile；兜底站点为 Hysteria2 masquerade 的固定依赖，不再降级
+  local domain email vless_path trojan_path cdn_domain
   domain="$(state_get '.domain')"
   email="$(state_get '.acmeEmail')"
   vless_path="$(state_get '.xray.ws.vlessPath')"
@@ -898,8 +1030,7 @@ set_caddyfile() {
   fi
 
   mkdir -p "$(dirname "${caddy_conf}")"
-  # 只在最外层备份，避免降级重试时把无效配置变成回滚目标
-  if [ -f "${caddy_conf}" ] && [ "${with_fallback}" == "yes" ]; then
+  if [ -f "${caddy_conf}" ]; then
     cp -a "${caddy_conf}" "${caddy_conf}.bak.$(date +%s)"
   fi
 
@@ -921,26 +1052,27 @@ EOF
     if [ -n "${cdn_domain}" ]; then
       caddy_site_block "${cdn_domain}" "${vless_path}" "${trojan_path}"
     fi
-    caddy_http_block "${domain}"
-    if [ -n "${cdn_domain}" ]; then
-      caddy_http_block "${cdn_domain}"
+    if [ "$(state_get '.caddy.httpBlock')" != "false" ]; then
+      caddy_http_block "${domain}"
+      if [ -n "${cdn_domain}" ]; then
+        caddy_http_block "${cdn_domain}"
+      fi
     fi
-    if [ "${with_fallback}" == "yes" ]; then
-      caddy_masquerade_block
-    fi
+    caddy_masquerade_block
   } > "${caddy_conf}"
 
   if ! run_logged "${caddy_bin}" validate --config "${caddy_conf}" --adapter caddyfile; then
-    if [ "${with_fallback}" == "yes" ]; then
-      colorEcho "${YELLOW}" "兜底站点不被当前 caddy 接受，降级为无兜底站点模式"
-      set_caddyfile no
-      return $?
-    fi
     colorEcho "${RED}" "Caddyfile 校验失败"
     local bak
     bak="$(ls -1t "${caddy_conf}".bak.* 2>/dev/null | head -n 1)"
     [ -n "${bak}" ] && mv -f "${bak}" "${caddy_conf}"
     return 1
+  fi
+
+  # validate 以 root 运行时会就地生成 root 属主的 PKI / ACME 存储，
+  # 而 caddy 服务以 caddy 用户运行，不修正属主会导致服务启动失败
+  if [ "$(id -u)" -eq 0 ]; then
+    chown -R caddy:caddy "${caddy_cert_root}" 2>/dev/null
   fi
   return 0
 }
@@ -1009,6 +1141,11 @@ cert_status() {
     colorEcho "${GREEN}" "运行中"
   else
     colorEcho "${RED}" "未运行"
+  fi
+
+  if [ "$(state_get '.caddy.tlsMode')" == "internal" ]; then
+    printf "%s\t%s\t" "[模式]" "internal" | expand -t 16
+    colorEcho "${YELLOW}" "Caddy 本地 CA（客户端需信任该 CA 或跳过校验）"
   fi
 
   printf "\n"
@@ -1378,24 +1515,13 @@ set_hysteria_config() {
   mkdir -p "$(dirname "${hysteria_conf}")" "${hysteria_cert_dir}"
   [ -f "${hysteria_conf}" ] && cp -a "${hysteria_conf}" "${hysteria_conf}.bak.$(date +%s)"
 
-  # 8443 有兜底站点时用反向代理伪装成 mikutap，否则退化为静态页面
-  if grep -q "^https://:${CADDY_HTTPS_PORT}" "${caddy_conf}" 2>/dev/null; then
-    masquerade="masquerade:
+  # 固定反代到 8443 兜底站点，伪装成与主站一致的模板页（不再退化为内置静态页）
+  masquerade="masquerade:
   type: proxy
   proxy:
     url: https://127.0.0.1:${CADDY_HTTPS_PORT}
     rewriteHost: true
     insecure: true"
-  else
-    masquerade="masquerade:
-  type: string
-  string:
-    statusCode: 200
-    headers:
-      content-type: text/html; charset=utf-8
-    body: |
-      <!DOCTYPE html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><title>Welcome</title></head><body><h1>Hello World</h1></body></html>"
-  fi
 
   cat > "${hysteria_conf}" <<-EOF
 listen: :${REALITY_PORT}
@@ -1869,7 +1995,8 @@ check_ports() {
 
   for p in "${tcp_ports[@]}"; do
     if port_in_use "${p}" tcp; then
-      if [ "${p}" == "${REALITY_PORT}" ] && systemctl is-active --quiet xray; then
+      if { [ "${p}" == "${REALITY_PORT}" ] || [ "${p}" == "${WS_VLESS_PORT}" ] || [ "${p}" == "${WS_TROJAN_PORT}" ]; } \
+         && systemctl is-active --quiet xray; then
         continue
       fi
       if { [ "${p}" == "80" ] || [ "${p}" == "${CADDY_HTTPS_PORT}" ]; } && systemctl is-active --quiet caddy; then
@@ -1886,6 +2013,75 @@ check_ports() {
   fi
 
   return ${conflict}
+}
+
+# 端口占用兜底处理：
+#   - 80/tcp  ：可终止占用进程，或跳过 http 站点（放弃 ACME HTTP-01 与 301 跳转）
+#   - 443/tcp ：Reality 必须独占总线，只能终止占用进程，否则中止安装
+#   - 443/udp ：Hysteria2 同理
+resolve_port_conflicts() {
+  local p owner choice skipped_http=0
+  local tcp_ports=("${REALITY_PORT}" 80 "${CADDY_HTTPS_PORT}" "${WS_VLESS_PORT}" "${WS_TROJAN_PORT}")
+
+  for p in "${tcp_ports[@]}"; do
+    port_in_use "${p}" tcp || continue
+    if { [ "${p}" == "${REALITY_PORT}" ] || [ "${p}" == "${WS_VLESS_PORT}" ] || [ "${p}" == "${WS_TROJAN_PORT}" ]; } \
+       && systemctl is-active --quiet xray; then
+      continue
+    fi
+    if { [ "${p}" == "80" ] || [ "${p}" == "${CADDY_HTTPS_PORT}" ]; } && systemctl is-active --quiet caddy; then
+      continue
+    fi
+
+    owner="$(port_owner "${p}" tcp)"
+    colorEcho "${RED}" "端口 ${p}/tcp 被占用: ${owner}"
+    if [ "${p}" == "80" ]; then
+      colorEcho "${YELLOW}" "Y 终止占用进程 / S 跳过 80 站点（放弃 ACME HTTP-01 与跳转）/ N 忽略"
+      read -rp "处理方式 (Y/S/N): " choice
+      case "${choice}" in
+        [yY] ) kill_port_owner "${p}" tcp ;;
+        [sS] ) skipped_http=1; continue ;;
+        * ) continue ;;
+      esac
+    else
+      read -rp "终止占用进程 (Y/N)? " choice
+      case "${choice}" in
+        [yY] ) kill_port_owner "${p}" tcp ;;
+        * ) ;;
+      esac
+    fi
+
+    if port_in_use "${p}" tcp; then
+      if [ "${p}" == "${REALITY_PORT}" ]; then
+        colorEcho "${RED}" "443/tcp 无法回落：Reality 必须占用该端口，请释放后再安装"
+        return 1
+      fi
+      if [ "${p}" == "${CADDY_HTTPS_PORT}" ] || [ "${p}" == "${WS_VLESS_PORT}" ] || [ "${p}" == "${WS_TROJAN_PORT}" ]; then
+        colorEcho "${RED}" "端口 ${p}/tcp 无法回落，请释放后再安装"
+        return 1
+      fi
+    fi
+  done
+
+  if port_in_use "${REALITY_PORT}" udp && ! systemctl is-active --quiet hysteria; then
+    owner="$(port_owner "${REALITY_PORT}" udp)"
+    colorEcho "${RED}" "端口 ${REALITY_PORT}/udp 被占用: ${owner}"
+    colorEcho "${YELLOW}" "443/udp 无法回落：Hysteria2 必须占用该端口"
+    read -rp "终止占用进程 (Y/N)? " choice
+    case "${choice}" in
+      [yY] ) kill_port_owner "${REALITY_PORT}" udp ;;
+    esac
+    if port_in_use "${REALITY_PORT}" udp; then
+      colorEcho "${RED}" "443/udp 仍被占用，请手动释放后再安装"
+      return 1
+    fi
+  fi
+
+  if [ "${skipped_http}" == "1" ]; then
+    state_set '.caddy.httpBlock' 'false'
+    colorEcho "${YELLOW}" "已跳过 80 站点：ACME HTTP-01 将不可用，请改用本地测试证书或自行提供证书"
+  fi
+  return 0
 }
 
 migrate_from_old() {
@@ -1939,7 +2135,19 @@ install_all() {
 
   if ! check_ports; then
     migrate_from_old
-    check_ports && colorEcho "${YELLOW}" "端口仍被占用，安装可能失败"
+    if ! check_ports; then
+      if ! resolve_port_conflicts; then
+        return 1
+      fi
+    fi
+  fi
+
+  # 80 端口重新可用（或由本机 caddy 持有）时，恢复 http 跳转站点
+  if [ "$(state_get '.caddy.httpBlock')" == "false" ]; then
+    if ! port_in_use 80 tcp || port_owner 80 tcp | grep -qi caddy; then
+      state_set '.caddy.httpBlock' 'true'
+      colorEcho "${GREEN}" "80 端口已可用，恢复 http 跳转站点"
+    fi
   fi
 
   if ! ask_domain; then
@@ -1949,8 +2157,14 @@ install_all() {
   state_set '.domain' "$(json_quote "${domain}")"
   echo "install for domain ${domain}" | writeLog >> "${log_path}"
 
+  # 本地测试开关：XTWALL_TLS_MODE=internal 时改用 Caddy 本地 CA 签发
+  if [ "${XTWALL_TLS_MODE:-}" == "internal" ]; then
+    state_set '.caddy.tlsMode' '"internal"'
+    colorEcho "${YELLOW}" "证书模式: internal（Caddy 本地 CA，仅适合本地测试）"
+  fi
+
   colorEchoFlush "${BLUE}" "部署伪装站点\r"
-  build_web force
+  build_web force || return 1
 
   colorEchoFlush "${BLUE}" "安装 caddy\r"
   get_caddy || return 1
@@ -1959,10 +2173,16 @@ install_all() {
   set_caddyfile || return 1
 
   systemctl restart caddy 2>&1 | writeLog >> "${log_path}"
+  if ! systemctl is-active --quiet caddy; then
+    colorEcho "${RED}" "caddy 启动失败，排查: journalctl -u caddy -n 50"
+    return 1
+  fi
 
   colorEchoFlush "${BLUE}" "等待证书签发\r"
   if wait_caddy_cert "${domain}"; then
     colorEcho "${LGREEN}" "完成: 证书签发"
+  elif [ "$(state_get '.caddy.tlsMode')" == "internal" ]; then
+    colorEcho "${YELLOW}" "本地 CA 证书未就绪，请检查: journalctl -u caddy -n 50"
   else
     colorEcho "${YELLOW}" "证书尚未就绪，请检查域名解析与 80 端口后执行\"证书巡检\""
   fi
@@ -1974,12 +2194,20 @@ install_all() {
   set_xray_config || return 1
   xray_validate || return 1
   systemctl restart xray 2>&1 | writeLog >> "${log_path}"
+  if ! systemctl is-active --quiet xray; then
+    colorEcho "${RED}" "xray 启动失败，排查: journalctl -u xray -n 50"
+    return 1
+  fi
 
   colorEchoFlush "${BLUE}" "安装 hysteria2\r"
   get_hysteria || return 1
   cert_sync || colorEcho "${YELLOW}" "证书同步失败，Hysteria2 可能无法启动"
   set_hysteria_config || return 1
   systemctl restart hysteria 2>&1 | writeLog >> "${log_path}"
+  if ! systemctl is-active --quiet hysteria; then
+    colorEcho "${RED}" "hysteria 启动失败，排查: journalctl -u hysteria -n 50"
+    return 1
+  fi
 
   setup_cron
 
@@ -2118,6 +2346,64 @@ rm_xtwall() {
 # ============================================================
 # 第11节 入口
 # ============================================================
+# 切换证书签发模式：acme（公网域名）<-> internal（Caddy 本地 CA，本地测试）
+toggle_tls_mode() {
+  if [ "$(state_get '.caddy.installed')" != "true" ]; then
+    colorEcho "${YELLOW}" "请先安装 xtwall"
+    return 1
+  fi
+  if [ -z "$(state_get '.domain')" ]; then
+    colorEcho "${YELLOW}" "尚未设置域名"
+    return 1
+  fi
+
+  local cur target confirm
+  cur="$(state_get '.caddy.tlsMode')"
+  [ -z "${cur}" ] && cur="acme"
+
+  if [ "${cur}" == "internal" ]; then
+    target="acme"
+    colorEcho "${YELLOW}" "当前: internal。切回 acme 需要域名解析到本机且 80 端口可被 CA 回源"
+  else
+    target="internal"
+    colorEcho "${YELLOW}" "当前: acme。切换后使用 Caddy 本地 CA，客户端需信任该 CA 或跳过校验"
+  fi
+
+  read -rp "确认切换为 ${target} (Y/N)? " confirm
+  case "${confirm}" in
+    [yY] ) ;;
+    * ) colorEcho "${YELLOW}" "已取消"; return 0 ;;
+  esac
+
+  state_set '.caddy.tlsMode' "$(json_quote "${target}")"
+  if ! set_caddyfile; then
+    state_set '.caddy.tlsMode' "$(json_quote "${cur}")"
+    colorEcho "${RED}" "Caddyfile 生成失败，已回滚为 ${cur}"
+    return 1
+  fi
+
+  systemctl restart caddy 2>&1 | writeLog >> "${log_path}"
+  if ! systemctl is-active --quiet caddy; then
+    colorEcho "${RED}" "caddy 启动失败，排查: journalctl -u caddy -n 50"
+    return 1
+  fi
+
+  if wait_caddy_cert "$(state_get '.domain')"; then
+    colorEcho "${LGREEN}" "完成: 证书已就绪 (${target})"
+  else
+    colorEcho "${YELLOW}" "证书尚未就绪，可稍后执行\"证书巡检\""
+  fi
+
+  cert_sync || colorEcho "${YELLOW}" "证书同步失败，Hysteria2 可能无法启动"
+  systemctl restart hysteria 2>&1 | writeLog >> "${log_path}"
+
+  if [ "${target}" == "internal" ]; then
+    colorEcho "${YELLOW}" "本地 CA 根证书: ${caddy_cert_root}/pki/authorities/local/root.crt"
+    colorEcho "${YELLOW}" "该 CA 签发的证书默认仅 12 小时，建议用 cron 定时执行 xtwall --cert-sync"
+  fi
+  return 0
+}
+
 show_menu() {
   echo ""
   echo "----------状态----------"
@@ -2140,8 +2426,9 @@ show_menu() {
   echo "----------运维----------"
   echo "12) 健康检查"
   echo "13) VPS 工具"
-  echo "14) 卸载 xtwall"
-  echo "15) 退出"
+  echo "14) 本地测试证书 (tls internal) 开关"
+  echo "15) 卸载 xtwall"
+  echo "16) 退出"
   echo ""
 }
 
@@ -2170,8 +2457,9 @@ menu() {
       "11") get_hysteria && continue_prompt ;;
       "12") health_check && continue_prompt ;;
       "13") vps_tools ;;
-      "14") rm_xtwall ;;
-      "15") exit 0 ;;
+      "14") toggle_tls_mode && continue_prompt ;;
+      "15") rm_xtwall ;;
+      "16") exit 0 ;;
       *) exit 0 ;;
     esac
   done

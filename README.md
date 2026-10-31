@@ -39,7 +39,26 @@ xtwall --cert-sync   # 同步 Caddy 证书到 Hysteria2（由 cron 每日调用�
 
 Reality 的 `dest` 指向本地 Caddy，非 Reality 流量不会离开本机；对外只需放行 443/TCP 与 443/UDP（80 仅签发/续期证书时需要，Cloudflare 回源也走 443/TCP）。
 
-菜单中的“更新伪装站点模板”支持输入本地压缩包路径或下载 URL，压缩包需包含根目录 `index.html`，支持 ZIP、TAR、TAR.GZ 和 TGZ 格式。
+伪装站点默认为 mikutap 单页模板，可用 `XTWALL_WEB_TEMPLATE` 指向其他压缩包覆盖。菜单中的“更新伪装站点模板”支持输入本地压缩包路径或下载 URL（留空回车即恢复默认模板），压缩包需包含根目录 `index.html`，支持 ZIP、TAR、TAR.GZ 和 TGZ 格式。Hysteria2 的 masquerade 固定反代到本地兜底站点，不再退化为内置静态页。
+
+## 本地测试
+
+域名解析到私网地址时无法通过 ACME 回源（Let's Encrypt 会直接拒绝），可改用 Caddy 本地 CA 签发：
+
+```sh
+XTWALL_TLS_MODE=internal bash <(curl -sL https://raw.githubusercontent.com/Yanel85/xtwall/main/install.sh)
+```
+
+安装后也可通过菜单“本地测试证书 (tls internal) 开关”随时切换。注意本地 CA 证书默认仅 12 小时有效期，需配合定时 `xtwall --cert-sync`，且客户端要信任该 CA 根证书或跳过校验。
+
+## 端口冲突处理
+
+安装时若端口已被占用，脚本会列出占用进程并给出处理方式：
+
+- `80/tcp`：可终止占用进程，或选择跳过 http 站点（写入 `caddy.httpBlock=false`，放弃 ACME HTTP-01 与 301 跳转）；待 80 重新空闲后再执行安装会自动恢复该站点
+- `443/tcp`、`443/udp`、`8443`、`8080`、`8081`：无法回落，必须终止占用进程或手动释放，否则中止安装
+
+运行中替换伪装站点模板时，脚本会短暂停止 caddy 再原子替换 `/var/www/html`，替换完成后自动拉起（caddy 的 `ReadWritePaths` 会以 bind mount 占住该目录，无法直接重命名）。
 
 ## 两个域名模型
 
