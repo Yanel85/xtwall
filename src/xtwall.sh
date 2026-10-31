@@ -1796,10 +1796,10 @@ display_sub() {
   fi
   uri="$(state_get '.sub.uri')"
   sub_url="https://${domain}/sub/${uri}"
-  qr_data="$(printf '%s' "sub://${sub_url}" | base64 --wrap=0)"
+  qr_data="$(urlEncode "${sub_url}")"
 
   printf "%s\n" "${sub_url}"
-  printf '%s\n\n' "二维码: https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=sub://${qr_data}"
+  printf '%s\n\n' "二维码: https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${qr_data}"
 
   if [ "$(state_get '.sub.api.installed')" == "true" ]; then
     local api_prefix
@@ -2385,8 +2385,6 @@ menu() {
   echo ""
   check_status
 
-  COLUMNS=woof
-
   while true; do
     show_menu
     read -rp "选择操作 [输入任意值退出]: " opt
@@ -2422,7 +2420,7 @@ main() {
   case "${1}" in
     --install)
       install_all
-      menu
+      exit $?
       ;;
     --cert-sync) cert_sync ;;
     --status)

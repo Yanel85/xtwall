@@ -15,7 +15,6 @@ bash <(curl -sL https://raw.githubusercontent.com/Yanel85/xtwall/main/install.sh
 xtwall
 ```
 
-首次通过 `install.sh` 安装时，会自动进入一键安装流程，完成后显示运维菜单。
 
 非交互命令：
 
@@ -45,7 +44,7 @@ Reality 的 `dest` 指向本地 Caddy，非 Reality 流量不会离开本机；�
 
 ## 证书要求
 
-证书由 Caddy 通过 ACME HTTP-01 自动签发，域名必须解析到本机公网地址、且 80 端口能被 CA 回源。解析到私网地址（例如 `*.nip.io` 指向内网 IP）时 Let's Encrypt 会直接拒绝，无法签发。
+证书由 Caddy 通过 ACME HTTP-01 自动签发，域名必须解析到本机公网地址、且 80 端口能被 CA 回源。
 
 ## 端口冲突处理
 
@@ -61,7 +60,7 @@ Reality 的 `dest` 指向本地 Caddy，非 Reality 流量不会离开本机；�
 | 域名 | Cloudflare 状态 | 承载内容 |
 | :--- | :--- | :--- |
 | 直连域（安装时输入，必填） | 必须 `DNS Only`（灰云） | VLESS Reality、Hysteria2、Caddy 主站证书、直连形态分享链接 |
-| CDN 域（菜单 6 配置，可选） | 必须开启橙云 | VLESS-WS、Trojan-WS、订阅链接、subconverter |
+| CDN 域（菜单 6 配置，可选） | 配置时必须开启灰云，配置完成开启橙云 | VLESS-WS、Trojan-WS、订阅链接、subconverter |
 
 原因：Reality 依赖真实 TLS 握手与 SNI 校验，Hysteria2 跑在 QUIC/UDP 上，二者**都无法经过 HTTP CDN**；而 WS 类协议与订阅页可以。
 
